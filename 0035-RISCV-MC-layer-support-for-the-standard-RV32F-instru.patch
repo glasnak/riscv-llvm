@@ -1,0 +1,839 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alex Bradbury <asb@lowrisc.org>
+Subject: [RISCV] MC layer support for the standard RV32F instruction set
+ extension
+
+---
+ lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp      |  36 +++++
+ .../RISCV/Disassembler/RISCVDisassembler.cpp       |  25 +++
+ lib/Target/RISCV/InstPrinter/RISCVInstPrinter.cpp  |  12 +-
+ lib/Target/RISCV/InstPrinter/RISCVInstPrinter.h    |   4 +
+ lib/Target/RISCV/MCTargetDesc/RISCVBaseInfo.h      |  58 ++++++-
+ lib/Target/RISCV/RISCV.td                          |   6 +
+ lib/Target/RISCV/RISCVInstrFormats.td              |  47 +++++-
+ lib/Target/RISCV/RISCVInstrInfo.td                 |   1 +
+ lib/Target/RISCV/RISCVInstrInfoF.td                | 167 +++++++++++++++++++++
+ lib/Target/RISCV/RISCVRegisterInfo.td              |  52 +++++++
+ lib/Target/RISCV/RISCVSubtarget.h                  |   2 +
+ test/MC/RISCV/rv32f-invalid.s                      |  29 ++++
+ test/MC/RISCV/rv32f-valid.s                        | 164 ++++++++++++++++++++
+ test/MC/RISCV/rv32i-invalid.s                      |   4 +
+ 14 files changed, 594 insertions(+), 13 deletions(-)
+ create mode 100644 lib/Target/RISCV/RISCVInstrInfoF.td
+ create mode 100644 test/MC/RISCV/rv32f-invalid.s
+ create mode 100644 test/MC/RISCV/rv32f-valid.s
+
+diff --git a/lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp b/lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp
+index 3f76ce3b24a..0037d8d8af4 100644
+--- a/lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp
++++ b/lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp
+@@ -185,6 +185,20 @@ public:
+     return true;
+   }
+ 
++  /// Return true if the operand is a valid floating point rounding mode.
++  bool isFRMArg() const {
++    if (!isImm())
++      return false;
++    const MCExpr *Val = getImm();
++    auto *SVal = dyn_cast<MCSymbolRefExpr>(Val);
++    if (!SVal || SVal->getKind() != MCSymbolRefExpr::VK_None)
++      return false;
++
++    StringRef Str = SVal->getSymbol().getName();
++
++    return RISCVFPRndMode::stringToRoundingMode(Str) != RISCVFPRndMode::Invalid;
++  }
++
+   bool isUImm5() const {
+     int64_t Imm;
+     RISCVMCExpr::VariantKind VK;
+@@ -344,6 +358,22 @@ public:
+     }
+     Inst.addOperand(MCOperand::createImm(Imm));
+   }
++
++  // Returns the rounding mode represented by this RISCVOperand. Should only
++  // be called after checking isFRMArg.
++  RISCVFPRndMode::RoundingMode getRoundingMode() const {
++    // isFRMArg has validated the operand, meaning this cast is safe.
++    auto SE = cast<MCSymbolRefExpr>(getImm());
++    RISCVFPRndMode::RoundingMode FRM =
++        RISCVFPRndMode::stringToRoundingMode(SE->getSymbol().getName());
++    assert(FRM != RISCVFPRndMode::Invalid && "Invalid rounding mode");
++    return FRM;
++  }
++
++  void addFRMArgOperands(MCInst &Inst, unsigned N) const {
++    assert(N == 1 && "Invalid number of operands!");
++    Inst.addOperand(MCOperand::createImm(getRoundingMode()));
++  }
+ };
+ } // end anonymous namespace.
+ 
+@@ -411,6 +441,12 @@ bool RISCVAsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
+         ErrorLoc,
+         "operand must be formed of letters selected in-order from 'iorw'");
+   }
++  case Match_InvalidFRMArg: {
++    SMLoc ErrorLoc = ((RISCVOperand &)*Operands[ErrorInfo]).getStartLoc();
++    return Error(
++        ErrorLoc,
++        "operand must be a valid floating point rounding mode mnemonic");
++  }
+   }
+ 
+   llvm_unreachable("Unknown match type detected!");
+diff --git a/lib/Target/RISCV/Disassembler/RISCVDisassembler.cpp b/lib/Target/RISCV/Disassembler/RISCVDisassembler.cpp
+index 24c6c8db8a4..0f186004a4f 100644
+--- a/lib/Target/RISCV/Disassembler/RISCVDisassembler.cpp
++++ b/lib/Target/RISCV/Disassembler/RISCVDisassembler.cpp
+@@ -80,6 +80,31 @@ static DecodeStatus DecodeGPRRegisterClass(MCInst &Inst, uint64_t RegNo,
+    return MCDisassembler::Success;
+ }
+ 
++static const unsigned FPR32DecoderTable[] = {
++  RISCV::F0_32,  RISCV::F1_32,  RISCV::F2_32,  RISCV::F3_32,
++  RISCV::F4_32,  RISCV::F5_32,  RISCV::F6_32,  RISCV::F7_32,
++  RISCV::F8_32,  RISCV::F9_32,  RISCV::F10_32, RISCV::F11_32,
++  RISCV::F12_32, RISCV::F13_32, RISCV::F14_32, RISCV::F15_32,
++  RISCV::F16_32, RISCV::F17_32, RISCV::F18_32, RISCV::F19_32,
++  RISCV::F20_32, RISCV::F21_32, RISCV::F22_32, RISCV::F23_32,
++  RISCV::F24_32, RISCV::F25_32, RISCV::F26_32, RISCV::F27_32,
++  RISCV::F28_32, RISCV::F29_32, RISCV::F30_32, RISCV::F31_32
++};
++
++static DecodeStatus DecodeFPR32RegisterClass(MCInst &Inst, uint64_t RegNo,
++                                             uint64_t Address,
++                                             const void *Decoder) {
++  if (RegNo > sizeof(FPR32DecoderTable))
++    return MCDisassembler::Fail;
++
++  // We must define our own mapping from RegNo to register identifier.
++  // Accessing index RegNo in the register class will work in the case that
++  // registers were added in ascending order, but not in general.
++  unsigned Reg = FPR32DecoderTable[RegNo];
++  Inst.addOperand(MCOperand::createReg(Reg));
++  return MCDisassembler::Success;
++}
++
+ template <unsigned N>
+ static DecodeStatus decodeUImmOperand(MCInst &Inst, uint64_t Imm,
+                                       int64_t Address, const void *Decoder) {
+diff --git a/lib/Target/RISCV/InstPrinter/RISCVInstPrinter.cpp b/lib/Target/RISCV/InstPrinter/RISCVInstPrinter.cpp
+index 6bc4ea2cd0d..a396025ccc4 100644
+--- a/lib/Target/RISCV/InstPrinter/RISCVInstPrinter.cpp
++++ b/lib/Target/RISCV/InstPrinter/RISCVInstPrinter.cpp
+@@ -16,6 +16,7 @@
+ #include "llvm/MC/MCAsmInfo.h"
+ #include "llvm/MC/MCExpr.h"
+ #include "llvm/MC/MCInst.h"
++#include "llvm/MC/MCRegisterInfo.h"
+ #include "llvm/MC/MCSymbol.h"
+ #include "llvm/Support/ErrorHandling.h"
+ #include "llvm/Support/FormattedStream.h"
+@@ -24,11 +25,13 @@ using namespace llvm;
+ #define DEBUG_TYPE "asm-printer"
+ 
+ // Include the auto-generated portion of the assembly writer.
++#define PRINT_ALIAS_INSTR
+ #include "RISCVGenAsmWriter.inc"
+ 
+ void RISCVInstPrinter::printInst(const MCInst *MI, raw_ostream &O,
+                                  StringRef Annot, const MCSubtargetInfo &STI) {
+-  printInstruction(MI, O);
++  if (!printAliasInstr(MI, O))
++    printInstruction(MI, O);
+   printAnnotation(O, Annot);
+ }
+ 
+@@ -67,3 +70,10 @@ void RISCVInstPrinter::printFenceArg(const MCInst *MI, unsigned OpNo,
+   if ((FenceArg & RISCVFenceField::W) != 0)
+     O << 'w';
+ }
++
++void RISCVInstPrinter::printFRMArg(const MCInst *MI, unsigned OpNo,
++                                   raw_ostream &O) {
++  auto FRMArg =
++      static_cast<RISCVFPRndMode::RoundingMode>(MI->getOperand(OpNo).getImm());
++  O << RISCVFPRndMode::roundingModeToString(FRMArg);
++}
+diff --git a/lib/Target/RISCV/InstPrinter/RISCVInstPrinter.h b/lib/Target/RISCV/InstPrinter/RISCVInstPrinter.h
+index 3bb4fa37f15..58f3f841015 100644
+--- a/lib/Target/RISCV/InstPrinter/RISCVInstPrinter.h
++++ b/lib/Target/RISCV/InstPrinter/RISCVInstPrinter.h
+@@ -33,9 +33,13 @@ public:
+   void printOperand(const MCInst *MI, unsigned OpNo, raw_ostream &O,
+                     const char *Modifier = nullptr);
+   void printFenceArg(const MCInst *MI, unsigned OpNo, raw_ostream &O);
++  void printFRMArg(const MCInst *MI, unsigned OpNo, raw_ostream &O);
+ 
+   // Autogenerated by tblgen.
+   void printInstruction(const MCInst *MI, raw_ostream &O);
++  bool printAliasInstr(const MCInst *MI, raw_ostream &O);
++  void printCustomAliasOperand(const MCInst *MI, unsigned OpIdx,
++                               unsigned PrintMethodIdx, raw_ostream &O);
+   static const char *getRegisterName(unsigned RegNo,
+                                      unsigned AltIdx = RISCV::ABIRegAltName);
+ };
+diff --git a/lib/Target/RISCV/MCTargetDesc/RISCVBaseInfo.h b/lib/Target/RISCV/MCTargetDesc/RISCVBaseInfo.h
+index 9fafbb0a95a..b38f2eaa81b 100644
+--- a/lib/Target/RISCV/MCTargetDesc/RISCVBaseInfo.h
++++ b/lib/Target/RISCV/MCTargetDesc/RISCVBaseInfo.h
+@@ -15,6 +15,8 @@
+ #define LLVM_LIB_TARGET_RISCV_MCTARGETDESC_RISCVBASEINFO_H
+ 
+ #include "RISCVMCTargetDesc.h"
++#include "llvm/ADT/StringRef.h"
++#include "llvm/ADT/StringSwitch.h"
+ 
+ namespace llvm {
+ 
+@@ -24,12 +26,13 @@ namespace RISCVII {
+ enum {
+   InstFormatPseudo = 0,
+   InstFormatR = 1,
+-  InstFormatI = 2,
+-  InstFormatS = 3,
+-  InstFormatB = 4,
+-  InstFormatU = 5,
+-  InstFormatJ = 6,
+-  InstFormatOther = 7,
++  InstFormatR4 = 2,
++  InstFormatI = 3,
++  InstFormatS = 4,
++  InstFormatB = 5,
++  InstFormatU = 6,
++  InstFormatJ = 7,
++  InstFormatOther = 8,
+ 
+   InstFormatMask = 15
+ };
+@@ -51,6 +54,49 @@ enum FenceField {
+   W = 1
+ };
+ }
++
++// Describes the supported floating point rounding mode encodings.
++namespace RISCVFPRndMode {
++enum RoundingMode {
++  RNE = 0,
++  RTZ = 1,
++  RDN = 2,
++  RUP = 3,
++  RMM = 4,
++  DYN = 7,
++  Invalid
++};
++
++inline static StringRef roundingModeToString(RoundingMode RndMode) {
++  switch (RndMode) {
++  default:
++    llvm_unreachable("Unknown floating point rounding mode");
++  case RISCVFPRndMode::RNE:
++    return "rne";
++  case RISCVFPRndMode::RTZ:
++    return "rtz";
++  case RISCVFPRndMode::RDN:
++    return "rdn";
++  case RISCVFPRndMode::RUP:
++    return "rup";
++  case RISCVFPRndMode::RMM:
++    return "rmm";
++  case RISCVFPRndMode::DYN:
++    return "dyn";
++  }
++}
++
++inline static RoundingMode stringToRoundingMode(StringRef Str) {
++  return StringSwitch<RoundingMode>(Str)
++      .Case("rne", RISCVFPRndMode::RNE)
++      .Case("rtz", RISCVFPRndMode::RTZ)
++      .Case("rdn", RISCVFPRndMode::RDN)
++      .Case("rup", RISCVFPRndMode::RUP)
++      .Case("rmm", RISCVFPRndMode::RMM)
++      .Case("dyn", RISCVFPRndMode::DYN)
++      .Default(RISCVFPRndMode::Invalid);
++}
++} // namespace RISCVFPRndMode
+ } // namespace llvm
+ 
+ #endif
+diff --git a/lib/Target/RISCV/RISCV.td b/lib/Target/RISCV/RISCV.td
+index 63bcfd794c4..24fe235eaff 100644
+--- a/lib/Target/RISCV/RISCV.td
++++ b/lib/Target/RISCV/RISCV.td
+@@ -25,6 +25,12 @@ def FeatureStdExtA
+ def HasStdExtA : Predicate<"Subtarget->hasStdExtA()">,
+                            AssemblerPredicate<"FeatureStdExtA">;
+ 
++def FeatureStdExtF
++    : SubtargetFeature<"f", "HasStdExtF", "true",
++                       "'F' (Single-Precision Floating-Point)">;
++def HasStdExtF : Predicate<"Subtarget->hasStdExtF()">,
++                           AssemblerPredicate<"FeatureStdExtF">;
++
+ def Feature64Bit
+     : SubtargetFeature<"64bit", "HasRV64", "true", "Implements RV64">;
+ 
+diff --git a/lib/Target/RISCV/RISCVInstrFormats.td b/lib/Target/RISCV/RISCVInstrFormats.td
+index 3dca957e31f..ca368792340 100644
+--- a/lib/Target/RISCV/RISCVInstrFormats.td
++++ b/lib/Target/RISCV/RISCVInstrFormats.td
+@@ -33,12 +33,13 @@ class InstFormat<bits<4> val> {
+ }
+ def InstFormatPseudo : InstFormat<0>;
+ def InstFormatR      : InstFormat<1>;
+-def InstFormatI      : InstFormat<2>;
+-def InstFormatS      : InstFormat<3>;
+-def InstFormatB      : InstFormat<4>;
+-def InstFormatU      : InstFormat<5>;
+-def InstFormatJ      : InstFormat<6>;
+-def InstFormatOther  : InstFormat<7>;
++def InstFormatR4     : InstFormat<2>;
++def InstFormatI      : InstFormat<3>;
++def InstFormatS      : InstFormat<4>;
++def InstFormatB      : InstFormat<5>;
++def InstFormatU      : InstFormat<6>;
++def InstFormatJ      : InstFormat<7>;
++def InstFormatOther  : InstFormat<8>;
+ 
+ // The following opcode names and match those given in Table 19.1 in the
+ // RISC-V User-level ISA specification ("RISC-V base opcode map").
+@@ -118,6 +119,24 @@ class RVInstR<bits<7> funct7, bits<3> funct3, RISCVOpcode opcode, dag outs,
+   let Opcode = opcode.Value;
+ }
+ 
++class RVInstR4<bits<2> funct2, RISCVOpcode opcode, dag outs, dag ins,
++               string opcodestr, string argstr>
++    : RVInst<outs, ins, opcodestr, argstr, [], InstFormatR4> {
++  bits<5> rs3;
++  bits<5> rs2;
++  bits<5> rs1;
++  bits<3> funct3;
++  bits<5> rd;
++
++  let Inst{31-27} = rs3;
++  let Inst{26-25} = funct2;
++  let Inst{24-20} = rs2;
++  let Inst{19-15} = rs1;
++  let Inst{14-12} = funct3;
++  let Inst{11-7} = rd;
++  let Opcode = opcode.Value;
++}
++
+ class RVInstRAtomic<bits<5> funct5, bit aq, bit rl, bits<3> funct3,
+                     RISCVOpcode opcode, dag outs, dag ins, string opcodestr,
+                     string argstr>
+@@ -136,6 +155,22 @@ class RVInstRAtomic<bits<5> funct5, bit aq, bit rl, bits<3> funct3,
+   let Opcode = opcode.Value;
+ }
+ 
++class RVInstRFrm<bits<7> funct7, RISCVOpcode opcode, dag outs, dag ins,
++                 string opcodestr, string argstr>
++    : RVInst<outs, ins, opcodestr, argstr, [], InstFormatR> {
++  bits<5> rs2;
++  bits<5> rs1;
++  bits<3> funct3;
++  bits<5> rd;
++
++  let Inst{31-25} = funct7;
++  let Inst{24-20} = rs2;
++  let Inst{19-15} = rs1;
++  let Inst{14-12} = funct3;
++  let Inst{11-7} = rd;
++  let Opcode = opcode.Value;
++}
++
+ class RVInstI<bits<3> funct3, RISCVOpcode opcode, dag outs, dag ins,
+               string opcodestr, string argstr>
+     : RVInst<outs, ins, opcodestr, argstr, [], InstFormatI> {
+diff --git a/lib/Target/RISCV/RISCVInstrInfo.td b/lib/Target/RISCV/RISCVInstrInfo.td
+index 384371eae61..decda6abd5c 100644
+--- a/lib/Target/RISCV/RISCVInstrInfo.td
++++ b/lib/Target/RISCV/RISCVInstrInfo.td
+@@ -468,3 +468,4 @@ def ADJCALLSTACKUP   : Pseudo<(outs), (ins i32imm:$amt1, i32imm:$amt2),
+ 
+ include "RISCVInstrInfoM.td"
+ include "RISCVInstrInfoA.td"
++include "RISCVInstrInfoF.td"
+diff --git a/lib/Target/RISCV/RISCVInstrInfoF.td b/lib/Target/RISCV/RISCVInstrInfoF.td
+new file mode 100644
+index 00000000000..ea2d4175e79
+--- /dev/null
++++ b/lib/Target/RISCV/RISCVInstrInfoF.td
+@@ -0,0 +1,167 @@
++//===-- RISCVInstrInfoF.td - RISC-V 'F' instructions -------*- tablegen -*-===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This file describes the RISC-V instructions from the standard 'F',
++// Single-Precision Floating-Point instruction set extension.
++//
++//===----------------------------------------------------------------------===//
++
++//===----------------------------------------------------------------------===//
++// Operand and SDNode transformation definitions.
++//===----------------------------------------------------------------------===//
++
++// Floating-point rounding mode
++
++def FRMArg : AsmOperandClass {
++  let Name = "FRMArg";
++  let RenderMethod = "addFRMArgOperands";
++  let DiagnosticType = "InvalidFRMArg";
++}
++
++def frmarg : Operand<XLenVT> {
++  let ParserMatchClass = FRMArg;
++  let PrintMethod = "printFRMArg";
++  let DecoderMethod = "decodeUImmOperand<3>";
++}
++
++//===----------------------------------------------------------------------===//
++// Instruction class templates
++//===----------------------------------------------------------------------===//
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++class FPFMAS_rrr_frm<RISCVOpcode opcode, string opcodestr>
++    : RVInstR4<0b00, opcode, (outs FPR32:$rd),
++               (ins FPR32:$rs1, FPR32:$rs2, FPR32:$rs3, frmarg:$funct3),
++                opcodestr, "$rd, $rs1, $rs2, $rs3, $funct3">;
++
++class FPFMASDynFrmAlias<FPFMAS_rrr_frm Inst, string OpcodeStr>
++    : InstAlias<OpcodeStr#" $rd, $rs1, $rs2, $rs3",
++                (Inst FPR32:$rd, FPR32:$rs1, FPR32:$rs2, FPR32:$rs3, 0b111)>;
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++class FPALUS_rr<bits<7> funct7, bits<3> funct3, string opcodestr>
++    : RVInstR<funct7, funct3, OPC_OP_FP, (outs FPR32:$rd),
++              (ins FPR32:$rs1, FPR32:$rs2), opcodestr, "$rd, $rs1, $rs2">;
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++class FPALUS_rr_frm<bits<7> funct7, string opcodestr>
++    : RVInstRFrm<funct7, OPC_OP_FP, (outs FPR32:$rd),
++                 (ins FPR32:$rs1, FPR32:$rs2, frmarg:$funct3), opcodestr,
++                  "$rd, $rs1, $rs2, $funct3">;
++
++class FPALUSDynFrmAlias<FPALUS_rr_frm Inst, string OpcodeStr>
++    : InstAlias<OpcodeStr#" $rd, $rs1, $rs2",
++                (Inst FPR32:$rd, FPR32:$rs1, FPR32:$rs2, 0b111)>;
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++class FPUnaryOp_r<bits<7> funct7, bits<3> funct3, RegisterClass rdty,
++                RegisterClass rs1ty, string opcodestr>
++    : RVInstR<funct7, funct3, OPC_OP_FP, (outs rdty:$rd), (ins rs1ty:$rs1),
++              opcodestr, "$rd, $rs1">;
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++class FPUnaryOp_r_frm<bits<7> funct7, RegisterClass rdty, RegisterClass rs1ty,
++                      string opcodestr>
++    : RVInstRFrm<funct7, OPC_OP_FP, (outs rdty:$rd),
++                 (ins rs1ty:$rs1, frmarg:$funct3), opcodestr,
++                  "$rd, $rs1, $funct3">;
++
++class FPUnaryOpDynFrmAlias<FPUnaryOp_r_frm Inst, string OpcodeStr,
++                           RegisterClass rdty, RegisterClass rs1ty>
++    : InstAlias<OpcodeStr#" $rd, $rs1",
++                (Inst rdty:$rd, rs1ty:$rs1, 0b111)>;
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++class FPCmpS_rr<bits<3> funct3, string opcodestr>
++    : RVInstR<0b1010000, funct3, OPC_OP_FP, (outs GPR:$rd),
++              (ins FPR32:$rs1, FPR32:$rs2), opcodestr, "$rd, $rs1, $rs2">;
++
++//===----------------------------------------------------------------------===//
++// Instructions
++//===----------------------------------------------------------------------===//
++
++let Predicates = [HasStdExtF] in {
++let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in
++def FLW : RVInstI<0b010, OPC_LOAD_FP, (outs FPR32:$rd),
++                  (ins GPR:$rs1, simm12:$imm12),
++                   "flw", "$rd, ${imm12}(${rs1})">;
++
++// Operands for stores are in the order srcreg, base, offset rather than
++// reflecting the order these fields are specified in the instruction
++// encoding.
++let hasSideEffects = 0, mayLoad = 0, mayStore = 1 in
++def FSW : RVInstS<0b010, OPC_STORE_FP, (outs),
++                  (ins FPR32:$rs2, GPR:$rs1, simm12:$imm12),
++                   "fsw", "$rs2, ${imm12}(${rs1})">;
++
++def FMADD_S  : FPFMAS_rrr_frm<OPC_MADD, "fmadd.s">;
++def          : FPFMASDynFrmAlias<FMADD_S, "fmadd.s">;
++def FMSUB_S  : FPFMAS_rrr_frm<OPC_MSUB, "fmsub.s">;
++def          : FPFMASDynFrmAlias<FMSUB_S, "fmsub.s">;
++def FNMSUB_S : FPFMAS_rrr_frm<OPC_NMSUB, "fnmsub.s">;
++def          : FPFMASDynFrmAlias<FNMSUB_S, "fnmsub.s">;
++def FNMADD_S : FPFMAS_rrr_frm<OPC_NMADD, "fnmadd.s">;
++def          : FPFMASDynFrmAlias<FNMADD_S, "fnmadd.s">;
++
++def FADD_S : FPALUS_rr_frm<0b0000000, "fadd.s">;
++def        : FPALUSDynFrmAlias<FADD_S, "fadd.s">;
++def FSUB_S : FPALUS_rr_frm<0b0000100, "fsub.s">;
++def        : FPALUSDynFrmAlias<FSUB_S, "fsub.s">;
++def FMUL_S : FPALUS_rr_frm<0b0001000, "fmul.s">;
++def        : FPALUSDynFrmAlias<FMUL_S, "fmul.s">;
++def FDIV_S : FPALUS_rr_frm<0b0001100, "fdiv.s">;
++def        : FPALUSDynFrmAlias<FDIV_S, "fdiv.s">;
++
++def FSQRT_S : FPUnaryOp_r_frm<0b0101100, FPR32, FPR32, "fsqrt.s"> {
++  let rs2 = 0b00000;
++}
++def         : FPUnaryOpDynFrmAlias<FSQRT_S, "fsqrt.s", FPR32, FPR32>;
++
++def FSGNJ_S  : FPALUS_rr<0b0010000, 0b000, "fsgnj.s">;
++def FSGNJN_S : FPALUS_rr<0b0010000, 0b001, "fsgnjn.s">;
++def FSGNJX_S : FPALUS_rr<0b0010000, 0b010, "fsgnjx.s">;
++def FMIN_S   : FPALUS_rr<0b0010100, 0b000, "fmin.s">;
++def FMAX_S   : FPALUS_rr<0b0010100, 0b001, "fmax.s">;
++
++def FCVT_W_S : FPUnaryOp_r_frm<0b1100000, GPR, FPR32, "fcvt.w.s"> {
++  let rs2 = 0b00000;
++}
++def          : FPUnaryOpDynFrmAlias<FCVT_W_S, "fcvt.w.s", GPR, FPR32>;
++
++def FCVT_WU_S : FPUnaryOp_r_frm<0b1100000, GPR, FPR32, "fcvt.wu.s"> {
++  let rs2 = 0b00001;
++}
++def           : FPUnaryOpDynFrmAlias<FCVT_WU_S, "fcvt.wu.s", GPR, FPR32>;
++
++def FMV_X_W : FPUnaryOp_r<0b1110000, 0b000, GPR, FPR32, "fmv.x.w"> {
++  let rs2 = 0b00000;
++}
++
++def FEQ_S : FPCmpS_rr<0b010, "feq.s">;
++def FLT_S : FPCmpS_rr<0b001, "flt.s">;
++def FLE_S : FPCmpS_rr<0b000, "fle.s">;
++
++def FCLASS_S : FPUnaryOp_r<0b1110000, 0b001, GPR, FPR32, "fclass.s"> {
++  let rs2 = 0b00000;
++}
++
++def FCVT_S_W : FPUnaryOp_r_frm<0b1101000, FPR32, GPR, "fcvt.s.w"> {
++  let rs2 = 0b00000;
++}
++def          : FPUnaryOpDynFrmAlias<FCVT_S_W, "fcvt.s.w", FPR32, GPR>;
++
++def FCVT_S_WU : FPUnaryOp_r_frm<0b1101000, FPR32, GPR, "fcvt.s.wu"> {
++  let rs2 = 0b00001;
++}
++def           : FPUnaryOpDynFrmAlias<FCVT_S_WU, "fcvt.s.wu", FPR32, GPR>;
++
++def FMV_W_X : FPUnaryOp_r<0b1111000, 0b000, FPR32, GPR, "fmv.w.x"> {
++  let rs2 = 0b00000;
++}
++} // Predicates = [HasStdExtF]
+diff --git a/lib/Target/RISCV/RISCVRegisterInfo.td b/lib/Target/RISCV/RISCVRegisterInfo.td
+index 78c036a37b9..fd1d477e638 100644
+--- a/lib/Target/RISCV/RISCVRegisterInfo.td
++++ b/lib/Target/RISCV/RISCVRegisterInfo.td
+@@ -16,6 +16,12 @@ class RISCVReg<bits<5> Enc, string n, list<string> alt = []> : Register<n> {
+   let HWEncoding{4-0} = Enc;
+   let AltNames = alt;
+ }
++
++class RISCVReg32<bits<5> Enc, string n, list<string> alt = []> : Register<n> {
++  let HWEncoding{4-0} = Enc;
++  let AltNames = alt;
++}
++
+ def ABIRegAltName : RegAltNameIndex;
+ } // Namespace = "RISCV"
+ 
+@@ -72,3 +78,49 @@ def GPR : RegisterClass<"RISCV", [XLenVT], 32, (add
+       [RV32,              RV64,              DefaultMode],
+       [RegInfo<32,32,32>, RegInfo<64,64,64>, RegInfo<32,32,32>]>;
+ }
++
++// Floating point registers
++let RegAltNameIndices = [ABIRegAltName] in {
++  def F0_32  : RISCVReg32<0, "f0", ["ft0"]>, DwarfRegNum<[32]>;
++  def F1_32  : RISCVReg32<1, "f1", ["ft1"]>, DwarfRegNum<[33]>;
++  def F2_32  : RISCVReg32<2, "f2", ["ft2"]>, DwarfRegNum<[34]>;
++  def F3_32  : RISCVReg32<3, "f3", ["ft3"]>, DwarfRegNum<[35]>;
++  def F4_32  : RISCVReg32<4, "f4", ["ft4"]>, DwarfRegNum<[36]>;
++  def F5_32  : RISCVReg32<5, "f5", ["ft5"]>, DwarfRegNum<[37]>;
++  def F6_32  : RISCVReg32<6, "f6", ["ft6"]>, DwarfRegNum<[38]>;
++  def F7_32  : RISCVReg32<7, "f7", ["ft7"]>, DwarfRegNum<[39]>;
++  def F8_32  : RISCVReg32<8, "f8", ["fs0"]>, DwarfRegNum<[40]>;
++  def F9_32  : RISCVReg32<9, "f9", ["fs1"]>, DwarfRegNum<[41]>;
++  def F10_32 : RISCVReg32<10,"f10", ["fa0"]>, DwarfRegNum<[42]>;
++  def F11_32 : RISCVReg32<11,"f11", ["fa1"]>, DwarfRegNum<[43]>;
++  def F12_32 : RISCVReg32<12,"f12", ["fa2"]>, DwarfRegNum<[44]>;
++  def F13_32 : RISCVReg32<13,"f13", ["fa3"]>, DwarfRegNum<[45]>;
++  def F14_32 : RISCVReg32<14,"f14", ["fa4"]>, DwarfRegNum<[46]>;
++  def F15_32 : RISCVReg32<15,"f15", ["fa5"]>, DwarfRegNum<[47]>;
++  def F16_32 : RISCVReg32<16,"f16", ["fa6"]>, DwarfRegNum<[48]>;
++  def F17_32 : RISCVReg32<17,"f17", ["fa7"]>, DwarfRegNum<[49]>;
++  def F18_32 : RISCVReg32<18,"f18", ["fs2"]>, DwarfRegNum<[50]>;
++  def F19_32 : RISCVReg32<19,"f19", ["fs3"]>, DwarfRegNum<[51]>;
++  def F20_32 : RISCVReg32<20,"f20", ["fs4"]>, DwarfRegNum<[52]>;
++  def F21_32 : RISCVReg32<21,"f21", ["fs5"]>, DwarfRegNum<[53]>;
++  def F22_32 : RISCVReg32<22,"f22", ["fs6"]>, DwarfRegNum<[54]>;
++  def F23_32 : RISCVReg32<23,"f23", ["fs7"]>, DwarfRegNum<[55]>;
++  def F24_32 : RISCVReg32<24,"f24", ["fs8"]>, DwarfRegNum<[56]>;
++  def F25_32 : RISCVReg32<25,"f25", ["fs9"]>, DwarfRegNum<[57]>;
++  def F26_32 : RISCVReg32<26,"f26", ["fs10"]>, DwarfRegNum<[58]>;
++  def F27_32 : RISCVReg32<27,"f27", ["fs11"]>, DwarfRegNum<[59]>;
++  def F28_32 : RISCVReg32<28,"f28", ["ft8"]>, DwarfRegNum<[60]>;
++  def F29_32 : RISCVReg32<29,"f29", ["ft9"]>, DwarfRegNum<[61]>;
++  def F30_32 : RISCVReg32<30,"f30", ["ft10"]>, DwarfRegNum<[62]>;
++  def F31_32 : RISCVReg32<31,"f31", ["ft11"]>, DwarfRegNum<[63]>;
++}
++
++// The order of registers represents the preferred allocation sequence,
++// meaning caller-save regs are listed before callee-save.
++def FPR32 : RegisterClass<"RISCV", [f32], 32, (add
++    (sequence "F%u_32", 0, 7),
++    (sequence "F%u_32", 10, 17),
++    (sequence "F%u_32", 28, 31),
++    (sequence "F%u_32", 8, 9),
++    (sequence "F%u_32", 18, 27)
++)>;
+diff --git a/lib/Target/RISCV/RISCVSubtarget.h b/lib/Target/RISCV/RISCVSubtarget.h
+index 7080ce58efa..82edef65e11 100644
+--- a/lib/Target/RISCV/RISCVSubtarget.h
++++ b/lib/Target/RISCV/RISCVSubtarget.h
+@@ -32,6 +32,7 @@ class RISCVSubtarget : public RISCVGenSubtargetInfo {
+   virtual void anchor();
+   bool HasStdExtM = false;
+   bool HasStdExtA = false;
++  bool HasStdExtF = false;
+   bool HasRV64 = false;
+   unsigned XLen = 32;
+   MVT XLenVT = MVT::i32;
+@@ -70,6 +71,7 @@ public:
+   }
+   bool hasStdExtM() const { return HasStdExtM; }
+   bool hasStdExtA() const { return HasStdExtA; }
++  bool hasStdExtF() const { return HasStdExtF; }
+   bool is64Bit() const { return HasRV64; }
+   MVT getXLenVT() const { return XLenVT; }
+   unsigned getXLen() const { return XLen; }
+diff --git a/test/MC/RISCV/rv32f-invalid.s b/test/MC/RISCV/rv32f-invalid.s
+new file mode 100644
+index 00000000000..7ef882805cc
+--- /dev/null
++++ b/test/MC/RISCV/rv32f-invalid.s
+@@ -0,0 +1,29 @@
++# RUN: not llvm-mc -triple riscv32 -mattr=+f < %s 2>&1 | FileCheck %s
++
++# Out of range immediates
++## simm12
++flw ft1, -2049(a0) # CHECK: :[[@LINE]]:10: error: immediate must be an integer in the range [-2048, 2047]
++fsw ft2, 2048(a1) # CHECK: :[[@LINE]]:10: error: immediate must be an integer in the range [-2048, 2047]
++
++# Memory operand not formatted correctly
++flw ft1, a0, -200 # CHECK: :[[@LINE]]:10: error: immediate must be an integer in the range [-2048, 2047]
++fsw ft2, a1, 100 # CHECK: :[[@LINE]]:10: error: immediate must be an integer in the range [-2048, 2047]
++
++# Invalid register names
++flw ft15, 100(a0) # CHECK: :[[@LINE]]:5: error: invalid operand for instruction
++flw ft1, 100(a10) # CHECK: :[[@LINE]]:14: error: expected register
++fsgnjn.s fa100, fa2, fa3 # CHECK: :[[@LINE]]:10: error: invalid operand for instruction
++
++# Integer registers where FP regs are expected
++fmv.x.w fs7, a2 # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
++
++# FP registers where integer regs are expected
++fmv.w.x a8, ft2 # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
++
++# Rounding mode when a register is expected
++fmadd.s f10, f11, f12, ree # CHECK: :[[@LINE]]:24: error: invalid operand for instruction
++
++# Invalid rounding modes
++fmadd.s f10, f11, f12, f13, ree # CHECK: :[[@LINE]]:29: error: operand must be a valid floating point rounding mode mnemonic
++fmsub.s f14, f15, f16, f17, 0 # CHECK: :[[@LINE]]:29: error: operand must be a valid floating point rounding mode mnemonic
++fnmsub.s f18, f19, f20, f21, 0b111 # CHECK: :[[@LINE]]:30: error: operand must be a valid floating point rounding mode mnemonic
+diff --git a/test/MC/RISCV/rv32f-valid.s b/test/MC/RISCV/rv32f-valid.s
+new file mode 100644
+index 00000000000..398173836c5
+--- /dev/null
++++ b/test/MC/RISCV/rv32f-valid.s
+@@ -0,0 +1,164 @@
++# RUN: llvm-mc %s -triple=riscv32 -mattr=+f -show-encoding \
++# RUN:     | FileCheck -check-prefixes=CHECK,CHECK-INST %s
++# RUN: llvm-mc %s -triple=riscv64 -mattr=+f -show-encoding \
++# RUN:     | FileCheck -check-prefixes=CHECK,CHECK-INST %s
++# RUN: llvm-mc -filetype=obj -triple riscv32 -mattr=+f < %s \
++# RUN:     | llvm-objdump -mattr=+f -d - | FileCheck -check-prefix=CHECK-INST %s
++# RUN: llvm-mc -filetype=obj -triple riscv64 -mattr=+f < %s \
++# RUN:     | llvm-objdump -mattr=+f -d - | FileCheck -check-prefix=CHECK-INST %s
++
++# CHECK-INST: flw ft0, 12(a0)
++# CHECK: encoding: [0x07,0x20,0xc5,0x00]
++flw f0, 12(a0)
++# CHECK-INST: flw ft1, 4(ra)
++# CHECK: encoding: [0x87,0xa0,0x40,0x00]
++flw f1, +4(ra)
++# CHECK-INST: flw ft2, -2048(a3)
++# CHECK: encoding: [0x07,0xa1,0x06,0x80]
++flw f2, -2048(x13)
++# CHECK-INST: flw ft3, -2048(s1)
++# CHECK: encoding: [0x87,0xa1,0x04,0x80]
++flw f3, %lo(2048)(s1)
++# CHECK-INST: flw ft4, 2047(s2)
++# CHECK: encoding: [0x07,0x22,0xf9,0x7f]
++flw f4, 2047(s2)
++# CHECK-INST: flw ft5, 0(s3)
++# CHECK: encoding: [0x87,0xa2,0x09,0x00]
++flw f5, 0(s3)
++
++# CHECK-INST: fsw ft6, 2047(s4)
++# CHECK: encoding: [0xa7,0x2f,0x6a,0x7e]
++fsw f6, 2047(s4)
++# CHECK-INST: fsw ft7, -2048(s5)
++# CHECK: encoding: [0x27,0xa0,0x7a,0x80]
++fsw f7, -2048(s5)
++# CHECK-INST: fsw fs0, -2048(s6)
++# CHECK: encoding: [0x27,0x20,0x8b,0x80]
++fsw f8, %lo(2048)(s6)
++# CHECK-INST: fsw fs1, 999(s7)
++# CHECK: encoding: [0xa7,0xa3,0x9b,0x3e]
++fsw f9, 999(s7)
++
++# CHECK-INST: fmadd.s fa0, fa1, fa2, fa3
++# CHECK: encoding: [0x43,0xf5,0xc5,0x68]
++fmadd.s f10, f11, f12, f13
++# CHECK-INST: fmsub.s fa4, fa5, fa6, fa7
++# CHECK: encoding: [0x47,0xf7,0x07,0x89]
++fmsub.s f14, f15, f16, f17
++# CHECK-INST: fnmsub.s fs2, fs3, fs4, fs5
++# CHECK: encoding: [0x4b,0xf9,0x49,0xa9]
++fnmsub.s f18, f19, f20, f21
++# CHECK-INST: fnmadd.s fs6, fs7, fs8, fs9
++# CHECK: encoding: [0x4f,0xfb,0x8b,0xc9]
++fnmadd.s f22, f23, f24, f25
++
++# CHECK-INST: fadd.s fs10, fs11, ft8
++# CHECK: encoding: [0x53,0xfd,0xcd,0x01]
++fadd.s f26, f27, f28
++# CHECK-INST: fsub.s ft9, ft10, ft11
++# CHECK: encoding: [0xd3,0x7e,0xff,0x09]
++fsub.s f29, f30, f31
++# CHECK-INST: fmul.s ft0, ft1, ft2
++# CHECK: encoding: [0x53,0xf0,0x20,0x10]
++fmul.s ft0, ft1, ft2
++# CHECK-INST: fdiv.s ft3, ft4, ft5
++# CHECK: encoding: [0xd3,0x71,0x52,0x18]
++fdiv.s ft3, ft4, ft5
++# CHECK-INST: fsqrt.s ft6, ft7
++# CHECK: encoding: [0x53,0xf3,0x03,0x58]
++fsqrt.s ft6, ft7
++# CHECK-INST: fsgnj.s fs1, fa0, fa1
++# CHECK: encoding: [0xd3,0x04,0xb5,0x20]
++fsgnj.s fs1, fa0, fa1
++# CHECK-INST: fsgnjn.s fa1, fa3, fa4
++# CHECK: encoding: [0xd3,0x95,0xe6,0x20]
++fsgnjn.s fa1, fa3, fa4
++# CHECK-INST: fsgnjx.s fa4, fa3, fa2
++# CHECK: encoding: [0x53,0xa7,0xc6,0x20]
++fsgnjx.s fa4, fa3, fa2
++# CHECK-INST: fmin.s fa5, fa6, fa7
++# CHECK: encoding: [0xd3,0x07,0x18,0x29]
++fmin.s fa5, fa6, fa7
++# CHECK-INST: fmax.s fs2, fs3, fs4
++# CHECK: encoding: [0x53,0x99,0x49,0x29]
++fmax.s fs2, fs3, fs4
++# CHECK-INST: fcvt.w.s a0, fs5
++# CHECK: encoding: [0x53,0xf5,0x0a,0xc0]
++fcvt.w.s a0, fs5
++# CHECK-INST: fcvt.wu.s a1, fs6
++# CHECK: encoding: [0xd3,0x75,0x1b,0xc0]
++fcvt.wu.s a1, fs6
++# CHECK-INST: fmv.x.w a2, fs7
++# CHECK: encoding: [0x53,0x86,0x0b,0xe0]
++fmv.x.w a2, fs7
++# CHECK-INST: feq.s a1, fs8, fs9
++# CHECK: encoding: [0xd3,0x25,0x9c,0xa1]
++feq.s a1, fs8, fs9
++# CHECK-INST: flt.s a2, fs10, fs11
++# CHECK: encoding: [0x53,0x16,0xbd,0xa1]
++flt.s a2, fs10, fs11
++# CHECK-INST: fle.s a3, ft8, ft9
++# CHECK: encoding: [0xd3,0x06,0xde,0xa1]
++fle.s a3, ft8, ft9
++# CHECK-INST: fclass.s a3, ft10
++# CHECK: encoding: [0xd3,0x16,0x0f,0xe0]
++fclass.s a3, ft10
++# CHECK-INST: fcvt.s.w ft11, a4
++# CHECK: encoding: [0xd3,0x7f,0x07,0xd0]
++fcvt.s.w ft11, a4
++# CHECK-INST: fcvt.s.wu ft0, a5
++# CHECK: encoding: [0x53,0xf0,0x17,0xd0]
++fcvt.s.wu ft0, a5
++# CHECK-INST: fmv.w.x ft1, a6
++# CHECK: encoding: [0xd3,0x00,0x08,0xf0]
++fmv.w.x ft1, a6
++
++# Rounding modes
++
++# CHECK-INST: fmadd.s fa0, fa1, fa2, fa3, rne
++# CHECK: encoding: [0x43,0x85,0xc5,0x68]
++fmadd.s f10, f11, f12, f13, rne
++# CHECK-INST: fmsub.s fa4, fa5, fa6, fa7, rtz
++# CHECK: encoding: [0x47,0x97,0x07,0x89]
++fmsub.s f14, f15, f16, f17, rtz
++# CHECK-INST: fnmsub.s fs2, fs3, fs4, fs5, rdn
++# CHECK: encoding: [0x4b,0xa9,0x49,0xa9]
++fnmsub.s f18, f19, f20, f21, rdn
++# CHECK-INST: fnmadd.s fs6, fs7, fs8, fs9, rup
++# CHECK: encoding: [0x4f,0xbb,0x8b,0xc9]
++fnmadd.s f22, f23, f24, f25, rup
++# CHECK-INST: fmadd.s fa0, fa1, fa2, fa3, rmm
++# CHECK: encoding: [0x43,0xc5,0xc5,0x68]
++fmadd.s f10, f11, f12, f13, rmm
++# CHECK-INST: fmsub.s fa4, fa5, fa6, fa7
++# CHECK: encoding: [0x47,0xf7,0x07,0x89]
++fmsub.s f14, f15, f16, f17, dyn
++
++# CHECK-INST: fadd.s fs10, fs11, ft8, rne
++# CHECK: encoding: [0x53,0x8d,0xcd,0x01]
++fadd.s f26, f27, f28, rne
++# CHECK-INST: fsub.s ft9, ft10, ft11, rtz
++# CHECK: encoding: [0xd3,0x1e,0xff,0x09]
++fsub.s f29, f30, f31, rtz
++# CHECK-INST: fmul.s ft0, ft1, ft2, rdn
++# CHECK: encoding: [0x53,0xa0,0x20,0x10]
++fmul.s ft0, ft1, ft2, rdn
++# CHECK-INST: fdiv.s ft3, ft4, ft5, rup
++# CHECK: encoding: [0xd3,0x31,0x52,0x18]
++fdiv.s ft3, ft4, ft5, rup
++
++# CHECK-INST: fsqrt.s ft6, ft7, rmm
++# CHECK: encoding: [0x53,0xc3,0x03,0x58]
++fsqrt.s ft6, ft7, rmm
++# CHECK-INST: fcvt.w.s a0, fs5, rup
++# CHECK: encoding: [0x53,0xb5,0x0a,0xc0]
++fcvt.w.s a0, fs5, rup
++# CHECK-INST: fcvt.wu.s a1, fs6, rdn
++# CHECK: encoding: [0xd3,0x25,0x1b,0xc0]
++fcvt.wu.s a1, fs6, rdn
++# CHECK-INST: fcvt.s.w ft11, a4, rtz
++# CHECK: encoding: [0xd3,0x1f,0x07,0xd0]
++fcvt.s.w ft11, a4, rtz
++# CHECK-INST: fcvt.s.wu ft0, a5, rne
++# CHECK: encoding: [0x53,0x80,0x17,0xd0]
++fcvt.s.wu ft0, a5, rne
+diff --git a/test/MC/RISCV/rv32i-invalid.s b/test/MC/RISCV/rv32i-invalid.s
+index c321d0481ca..d5f98e72626 100644
+--- a/test/MC/RISCV/rv32i-invalid.s
++++ b/test/MC/RISCV/rv32i-invalid.s
+@@ -133,3 +133,7 @@ xor s2, s2 # CHECK: :[[@LINE]]:1: error: too few operands for instruction
+ # Instruction not in the base ISA
+ mul a4, ra, s0 # CHECK: :[[@LINE]]:1: error: instruction use requires an option to be enabled
+ amomaxu.w s5, s4, (s3) # CHECK: :[[@LINE]]:1: error: instruction use requires an option to be enabled
++fadd.s ft0, ft1, ft2 # CHECK: :[[@LINE]]:1: error: instruction use requires an option to be enabled
++
++# Using floating point registers when integer registers are expected
++addi a2, ft0, 24 # CHECK: :[[@LINE]]:10: error: invalid operand for instruction
+-- 
+2.16.2
+

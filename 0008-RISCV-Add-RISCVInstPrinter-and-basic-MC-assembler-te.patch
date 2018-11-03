@@ -12,14 +12,16 @@ Differential Revision: https://reviews.llvm.org/D23564
  lib/Target/RISCV/LLVMBuild.txt                     |  5 +-
  lib/Target/RISCV/MCTargetDesc/LLVMBuild.txt        |  2 +-
  .../RISCV/MCTargetDesc/RISCVMCTargetDesc.cpp       | 10 ++++
+ test/MC/RISCV/elf-header.s                         | 42 +++++++++++++++
  test/MC/RISCV/lit.local.cfg                        |  3 ++
  test/MC/RISCV/rv32i-invalid.s                      | 30 +++++++++++
  test/MC/RISCV/rv32i-valid.s                        | 63 ++++++++++++++++++++++
- 11 files changed, 237 insertions(+), 4 deletions(-)
+ 12 files changed, 279 insertions(+), 4 deletions(-)
  create mode 100644 lib/Target/RISCV/InstPrinter/CMakeLists.txt
  create mode 100644 lib/Target/RISCV/InstPrinter/LLVMBuild.txt
  create mode 100644 lib/Target/RISCV/InstPrinter/RISCVInstPrinter.cpp
  create mode 100644 lib/Target/RISCV/InstPrinter/RISCVInstPrinter.h
+ create mode 100644 test/MC/RISCV/elf-header.s
  create mode 100644 test/MC/RISCV/lit.local.cfg
  create mode 100644 test/MC/RISCV/rv32i-invalid.s
  create mode 100644 test/MC/RISCV/rv32i-valid.s
@@ -229,7 +231,7 @@ index e48f04963ff..92daae30e3f 100644
 +required_libraries = MC RISCVAsmPrinter RISCVInfo Support
  add_to_library_groups = RISCV
 diff --git a/lib/Target/RISCV/MCTargetDesc/RISCVMCTargetDesc.cpp b/lib/Target/RISCV/MCTargetDesc/RISCVMCTargetDesc.cpp
-index 41be0a2084b..0f68dd7aa05 100644
+index bad5f440061..72485c5cd08 100644
 --- a/lib/Target/RISCV/MCTargetDesc/RISCVMCTargetDesc.cpp
 +++ b/lib/Target/RISCV/MCTargetDesc/RISCVMCTargetDesc.cpp
 @@ -12,6 +12,7 @@
@@ -262,6 +264,54 @@ index 41be0a2084b..0f68dd7aa05 100644
 +    TargetRegistry::RegisterMCInstPrinter(*T, createRISCVMCInstPrinter);
    }
  }
+diff --git a/test/MC/RISCV/elf-header.s b/test/MC/RISCV/elf-header.s
+new file mode 100644
+index 00000000000..29a7036f2fc
+--- /dev/null
++++ b/test/MC/RISCV/elf-header.s
+@@ -0,0 +1,42 @@
++# RUN: llvm-mc %s -filetype=obj -triple=riscv32 | llvm-readobj -h \
++# RUN:     | FileCheck -check-prefix=RV32 %s
++# RUN: llvm-mc %s -filetype=obj -triple=riscv64 | llvm-readobj -h \
++# RUN:     | FileCheck -check-prefix=RV64 %s
++
++# RV32: Format: ELF32-riscv
++# RV32: Arch: riscv32
++# RV32: AddressSize: 32bit
++# RV32: ElfHeader {
++# RV32:   Ident {
++# RV32:     Magic: (7F 45 4C 46)
++# RV32:     Class: 32-bit (0x1)
++# RV32:     DataEncoding: LittleEndian (0x1)
++# RV32:     FileVersion: 1
++# RV32:     OS/ABI: SystemV (0x0)
++# RV32:     ABIVersion: 0
++# RV32:   }
++# RV32:   Type: Relocatable (0x1)
++# RV32:   Machine: EM_RISCV (0xF3)
++# RV32:   Version: 1
++# RV32:   Flags [ (0x0)
++# RV32:   ]
++# RV32: }
++
++# RV64: Format: ELF64-riscv
++# RV64: Arch: riscv64
++# RV64: AddressSize: 64bit
++# RV64: ElfHeader {
++# RV64:   Ident {
++# RV64:     Magic: (7F 45 4C 46)
++# RV64:     Class: 64-bit (0x2)
++# RV64:     DataEncoding: LittleEndian (0x1)
++# RV64:     FileVersion: 1
++# RV64:     OS/ABI: SystemV (0x0)
++# RV64:     ABIVersion: 0
++# RV64:   }
++# RV64:   Type: Relocatable (0x1)
++# RV64:   Machine: EM_RISCV (0xF3)
++# RV64:   Version: 1
++# RV64:   Flags [ (0x0)
++# RV64:   ]
++# RV64: }
 diff --git a/test/MC/RISCV/lit.local.cfg b/test/MC/RISCV/lit.local.cfg
 new file mode 100644
 index 00000000000..d0b081e3e8b
@@ -377,5 +427,5 @@ index 00000000000..fc89cd42016
 +# CHECK: encoding: [0x33,0x75,0x39,0x01]
 +and a0, s2, s3
 -- 
-2.14.1
+2.16.2
 

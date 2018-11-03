@@ -1,0 +1,1378 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alex Bradbury <asb@lowrisc.org>
+Subject: [RISCV] Add the RISCV target and compiler driver
+
+As RV64 codegen has not yet been upstreamed into LLVM, we focus on RV32 driver
+support (RV64 to follow).
+
+Differential Revision: https://reviews.llvm.org/D39963
+---
+ lib/Basic/CMakeLists.txt                           |   1 +
+ lib/Basic/Targets.cpp                              |  12 +
+ lib/Basic/Targets/RISCV.cpp                        |  52 +++
+ lib/Basic/Targets/RISCV.h                          | 103 +++++
+ lib/Driver/CMakeLists.txt                          |   1 +
+ lib/Driver/ToolChains/Arch/RISCV.cpp               |  61 +++
+ lib/Driver/ToolChains/Arch/RISCV.h                 |  32 ++
+ lib/Driver/ToolChains/Clang.cpp                    |  39 ++
+ lib/Driver/ToolChains/Clang.h                      |   2 +
+ lib/Driver/ToolChains/Gnu.cpp                      |  60 ++-
+ lib/Driver/ToolChains/Linux.cpp                    |  23 ++
+ .../Inputs/multilib_riscv_linux_sdk/bin/.keep      |   0
+ .../Inputs/multilib_riscv_linux_sdk/include/.keep  |   0
+ .../gcc/riscv64-unknown-linux-gnu/7.2.0/crtbegin.o |   0
+ .../7.2.0/lib32/ilp32/crtbegin.o                   |   0
+ .../7.2.0/lib32/ilp32d/crtbegin.o                  |   0
+ .../7.2.0/lib64/lp64/crtbegin.o                    |   0
+ .../7.2.0/lib64/lp64d/crtbegin.o                   |   0
+ .../riscv64-unknown-linux-gnu/bin/ld               |   1 +
+ .../multilib_riscv_linux_sdk/sysroot/lib/.keep     |   0
+ .../sysroot/lib32/ilp32/.keep                      |   0
+ .../sysroot/lib32/ilp32d/.keep                     |   0
+ .../sysroot/lib64/lp64/.keep                       |   0
+ .../sysroot/lib64/lp64d/.keep                      |   0
+ .../sysroot/usr/lib32/ilp32/.keep                  |   0
+ .../sysroot/usr/lib32/ilp32d/.keep                 |   0
+ .../sysroot/usr/lib64/lp64/.keep                   |   0
+ .../sysroot/usr/lib64/lp64d/.keep                  |   0
+ test/Driver/frame-pointer.c                        |  12 +
+ test/Driver/riscv-abi.c                            |  47 +++
+ test/Driver/riscv-features.c                       |   4 +
+ test/Driver/riscv32-toolchain.c                    |  75 ++++
+ test/Driver/riscv64-toolchain.c                    |  44 +++
+ test/Preprocessor/init.c                           | 413 +++++++++++++++++++++
+ 34 files changed, 981 insertions(+), 1 deletion(-)
+ create mode 100644 lib/Basic/Targets/RISCV.cpp
+ create mode 100644 lib/Basic/Targets/RISCV.h
+ create mode 100644 lib/Driver/ToolChains/Arch/RISCV.cpp
+ create mode 100644 lib/Driver/ToolChains/Arch/RISCV.h
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/bin/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/include/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/crtbegin.o
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32/crtbegin.o
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32d/crtbegin.o
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib64/lp64/crtbegin.o
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib64/lp64d/crtbegin.o
+ create mode 100755 test/Driver/Inputs/multilib_riscv_linux_sdk/riscv64-unknown-linux-gnu/bin/ld
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib32/ilp32/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib32/ilp32d/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib64/lp64/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib64/lp64d/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib32/ilp32/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib32/ilp32d/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib64/lp64/.keep
+ create mode 100644 test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib64/lp64d/.keep
+ create mode 100644 test/Driver/riscv-abi.c
+ create mode 100644 test/Driver/riscv-features.c
+ create mode 100644 test/Driver/riscv32-toolchain.c
+ create mode 100644 test/Driver/riscv64-toolchain.c
+
+diff --git a/lib/Basic/CMakeLists.txt b/lib/Basic/CMakeLists.txt
+index d0c9b902f6..823b908184 100644
+--- a/lib/Basic/CMakeLists.txt
++++ b/lib/Basic/CMakeLists.txt
+@@ -83,6 +83,7 @@ add_clang_library(clangBasic
+   Targets/OSTargets.cpp
+   Targets/PNaCl.cpp
+   Targets/PPC.cpp
++  Targets/RISCV.cpp
+   Targets/SPIR.cpp
+   Targets/Sparc.cpp
+   Targets/SystemZ.cpp
+diff --git a/lib/Basic/Targets.cpp b/lib/Basic/Targets.cpp
+index ae56f8bed2..e325403a1f 100644
+--- a/lib/Basic/Targets.cpp
++++ b/lib/Basic/Targets.cpp
+@@ -29,6 +29,7 @@
+ #include "Targets/OSTargets.h"
+ #include "Targets/PNaCl.h"
+ #include "Targets/PPC.h"
++#include "Targets/RISCV.h"
+ #include "Targets/SPIR.h"
+ #include "Targets/Sparc.h"
+ #include "Targets/SystemZ.h"
+@@ -371,6 +372,17 @@ TargetInfo *AllocateTarget(const llvm::Triple &Triple,
+   case llvm::Triple::r600:
+     return new AMDGPUTargetInfo(Triple, Opts);
+ 
++  case llvm::Triple::riscv32:
++    // TODO: add cases for FreeBSD, NetBSD, RTEMS once tested.
++    if (os == llvm::Triple::Linux)
++      return new LinuxTargetInfo<RISCV32TargetInfo>(Triple, Opts);
++    return new RISCV32TargetInfo(Triple, Opts);
++  case llvm::Triple::riscv64:
++    // TODO: add cases for FreeBSD, NetBSD, RTEMS once tested.
++    if (os == llvm::Triple::Linux)
++      return new LinuxTargetInfo<RISCV64TargetInfo>(Triple, Opts);
++    return new RISCV64TargetInfo(Triple, Opts);
++
+   case llvm::Triple::sparc:
+     switch (os) {
+     case llvm::Triple::Linux:
+diff --git a/lib/Basic/Targets/RISCV.cpp b/lib/Basic/Targets/RISCV.cpp
+new file mode 100644
+index 0000000000..8b2338bb85
+--- /dev/null
++++ b/lib/Basic/Targets/RISCV.cpp
+@@ -0,0 +1,52 @@
++//===--- RISCV.cpp - Implement RISCV target feature support ---------------===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This file implements RISCV TargetInfo objects.
++//
++//===----------------------------------------------------------------------===//
++
++#include "RISCV.h"
++#include "clang/Basic/MacroBuilder.h"
++#include "llvm/ADT/StringSwitch.h"
++
++using namespace clang;
++using namespace clang::targets;
++
++ArrayRef<const char *> RISCVTargetInfo::getGCCRegNames() const {
++  static const char *const GCCRegNames[] = {
++      "x0",  "x1",  "x2",  "x3",  "x4",  "x5",  "x6",  "x7",
++      "x8",  "x9",  "x10", "x11", "x12", "x13", "x14", "x15",
++      "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23",
++      "x24", "x25", "x26", "x27", "x28", "x29", "x30", "x31"};
++  return llvm::makeArrayRef(GCCRegNames);
++}
++
++ArrayRef<TargetInfo::GCCRegAlias> RISCVTargetInfo::getGCCRegAliases() const {
++  static const TargetInfo::GCCRegAlias GCCRegAliases[] = {
++      {{"zero"}, "x0"}, {{"ra"}, "x1"},  {{"sp"}, "x2"},   {{"gp"}, "x3"},
++      {{"tp"}, "x4"},   {{"t0"}, "x5"},  {{"t1"}, "x6"},   {{"t2"}, "x7"},
++      {{"s0"}, "x8"},   {{"s1"}, "x9"},  {{"a0"}, "x10"},  {{"a1"}, "x11"},
++      {{"a2"}, "x12"},  {{"a3"}, "x13"}, {{"a4"}, "x15"},  {{"a5"}, "x15"},
++      {{"a6"}, "x16"},  {{"a7"}, "x17"}, {{"s2"}, "x18"},  {{"s3"}, "x19"},
++      {{"s4"}, "x20"},  {{"s5"}, "x21"}, {{"s6"}, "x22"},  {{"s7"}, "x23"},
++      {{"s8"}, "x24"},  {{"s9"}, "x25"}, {{"s10"}, "x26"}, {{"s11"}, "x27"},
++      {{"t3"}, "x28"},  {{"t4"}, "x29"}, {{"t5"}, "x30"},  {{"t6"}, "x31"}};
++  return llvm::makeArrayRef(GCCRegAliases);
++}
++
++void RISCVTargetInfo::getTargetDefines(const LangOptions &Opts,
++                                       MacroBuilder &Builder) const {
++  Builder.defineMacro("__ELF__");
++  Builder.defineMacro("__riscv");
++  bool Is64Bit = getTriple().getArch() == llvm::Triple::riscv64;
++  Builder.defineMacro("__riscv_xlen", Is64Bit ? "64" : "32");
++  // TODO: modify when more code models and ABIs are supported.
++  Builder.defineMacro("__riscv_cmodel_medlow");
++  Builder.defineMacro("__riscv_float_abi_soft");
++}
+diff --git a/lib/Basic/Targets/RISCV.h b/lib/Basic/Targets/RISCV.h
+new file mode 100644
+index 0000000000..b35afd736d
+--- /dev/null
++++ b/lib/Basic/Targets/RISCV.h
+@@ -0,0 +1,103 @@
++//===--- RISCV.h - Declare RISCV target feature support ---------*- C++ -*-===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++//
++// This file declares RISCV TargetInfo objects.
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CLANG_LIB_BASIC_TARGETS_RISCV_H
++#define LLVM_CLANG_LIB_BASIC_TARGETS_RISCV_H
++
++#include "clang/Basic/TargetInfo.h"
++#include "clang/Basic/TargetOptions.h"
++#include "llvm/ADT/Triple.h"
++#include "llvm/Support/Compiler.h"
++
++namespace clang {
++namespace targets {
++
++// RISC-V Target
++class RISCVTargetInfo : public TargetInfo {
++protected:
++  std::string ABI;
++
++public:
++  RISCVTargetInfo(const llvm::Triple &Triple, const TargetOptions &)
++      : TargetInfo(Triple) {
++    TLSSupported = false;
++    LongDoubleWidth = 128;
++    LongDoubleAlign = 128;
++    LongDoubleFormat = &llvm::APFloat::IEEEquad();
++    SuitableAlign = 128;
++    WCharType = SignedInt;
++    WIntType = UnsignedInt;
++  }
++
++  StringRef getABI() const override { return ABI; }
++  void getTargetDefines(const LangOptions &Opts,
++                        MacroBuilder &Builder) const override;
++
++  ArrayRef<Builtin::Info> getTargetBuiltins() const override { return None; }
++
++  BuiltinVaListKind getBuiltinVaListKind() const override {
++    return TargetInfo::VoidPtrBuiltinVaList;
++  }
++
++  const char *getClobbers() const override { return ""; }
++
++  ArrayRef<const char *> getGCCRegNames() const override;
++
++  ArrayRef<TargetInfo::GCCRegAlias> getGCCRegAliases() const override;
++
++  bool validateAsmConstraint(const char *&Name,
++                             TargetInfo::ConstraintInfo &Info) const override {
++    return false;
++  }
++};
++class LLVM_LIBRARY_VISIBILITY RISCV32TargetInfo : public RISCVTargetInfo {
++public:
++  RISCV32TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
++      : RISCVTargetInfo(Triple, Opts) {
++    IntPtrType = SignedInt;
++    PtrDiffType = SignedInt;
++    SizeType = UnsignedInt;
++    resetDataLayout("e-m:e-p:32:32-i64:64-n32-S128");
++  }
++
++  bool setABI(const std::string &Name) override {
++    // TODO: support ilp32f and ilp32d ABIs.
++    if (Name == "ilp32") {
++      ABI = Name;
++      return true;
++    }
++    return false;
++  }
++};
++class LLVM_LIBRARY_VISIBILITY RISCV64TargetInfo : public RISCVTargetInfo {
++public:
++  RISCV64TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
++      : RISCVTargetInfo(Triple, Opts) {
++    LongWidth = LongAlign = PointerWidth = PointerAlign = 64;
++    IntMaxType = Int64Type = SignedLong;
++    resetDataLayout("e-m:e-p:64:64-i64:64-i128:128-n64-S128");
++  }
++
++  bool setABI(const std::string &Name) override {
++    // TODO: support lp64f and lp64d ABIs.
++    if (Name == "lp64") {
++      ABI = Name;
++      return true;
++    }
++    return false;
++  }
++};
++} // namespace targets
++} // namespace clang
++
++#endif // LLVM_CLANG_LIB_BASIC_TARGETS_RISCV_H
+diff --git a/lib/Driver/CMakeLists.txt b/lib/Driver/CMakeLists.txt
+index 5bf91f2be9..afb1cdf375 100644
+--- a/lib/Driver/CMakeLists.txt
++++ b/lib/Driver/CMakeLists.txt
+@@ -25,6 +25,7 @@ add_clang_library(clangDriver
+   ToolChains/Arch/ARM.cpp
+   ToolChains/Arch/Mips.cpp
+   ToolChains/Arch/PPC.cpp
++  ToolChains/Arch/RISCV.cpp
+   ToolChains/Arch/Sparc.cpp
+   ToolChains/Arch/SystemZ.cpp
+   ToolChains/Arch/X86.cpp
+diff --git a/lib/Driver/ToolChains/Arch/RISCV.cpp b/lib/Driver/ToolChains/Arch/RISCV.cpp
+new file mode 100644
+index 0000000000..2b4ae88365
+--- /dev/null
++++ b/lib/Driver/ToolChains/Arch/RISCV.cpp
+@@ -0,0 +1,61 @@
++//===--- RISCV.cpp - RISCV Helpers for Tools --------------------*- C++ -*-===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++
++#include "RISCV.h"
++#include "clang/Driver/Driver.h"
++#include "clang/Driver/DriverDiagnostic.h"
++#include "clang/Driver/Options.h"
++#include "llvm/Option/ArgList.h"
++#include "llvm/Support/TargetParser.h"
++#include "llvm/Support/raw_ostream.h"
++
++using namespace clang::driver;
++using namespace clang::driver::tools;
++using namespace clang;
++using namespace llvm::opt;
++
++void riscv::getRISCVTargetFeatures(const Driver &D, const ArgList &Args,
++                                   std::vector<StringRef> &Features) {
++  if (const Arg *A = Args.getLastArg(options::OPT_march_EQ)) {
++    StringRef MArch = A->getValue();
++    // TODO: handle rv64
++    std::pair<StringRef, StringRef> MArchSplit = StringRef(MArch).split("rv32");
++    if (!MArchSplit.second.size())
++      return;
++
++    for (char c : MArchSplit.second) {
++      switch (c) {
++      case 'i':
++        break;
++      case 'm':
++        Features.push_back("+m");
++        break;
++      case 'a':
++        Features.push_back("+a");
++        break;
++      case 'f':
++        Features.push_back("+f");
++        break;
++      case 'd':
++        Features.push_back("+d");
++        break;
++      case 'c':
++        Features.push_back("+c");
++        break;
++      }
++    }
++  }
++}
++
++StringRef riscv::getRISCVABI(const ArgList &Args, const llvm::Triple &Triple) {
++  if (Arg *A = Args.getLastArg(options::OPT_mabi_EQ))
++    return A->getValue();
++
++  return Triple.getArch() == llvm::Triple::riscv32 ? "ilp32" : "lp64";
++}
+diff --git a/lib/Driver/ToolChains/Arch/RISCV.h b/lib/Driver/ToolChains/Arch/RISCV.h
+new file mode 100644
+index 0000000000..beda14979f
+--- /dev/null
++++ b/lib/Driver/ToolChains/Arch/RISCV.h
+@@ -0,0 +1,32 @@
++//===--- RISCV.h - RISCV-specific Tool Helpers ------------------*- C++ -*-===//
++//
++//                     The LLVM Compiler Infrastructure
++//
++// This file is distributed under the University of Illinois Open Source
++// License. See LICENSE.TXT for details.
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_ARCH_RISCV_H
++#define LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_ARCH_RISCV_H
++
++#include "clang/Driver/Driver.h"
++#include "llvm/ADT/StringRef.h"
++#include "llvm/Option/Option.h"
++#include <string>
++#include <vector>
++
++namespace clang {
++namespace driver {
++namespace tools {
++namespace riscv {
++void getRISCVTargetFeatures(const Driver &D, const llvm::opt::ArgList &Args,
++                            std::vector<llvm::StringRef> &Features);
++StringRef getRISCVABI(const llvm::opt::ArgList &Args,
++                      const llvm::Triple &Triple);
++} // end namespace riscv
++} // namespace tools
++} // end namespace driver
++} // end namespace clang
++
++#endif // LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_ARCH_RISCV_H
+diff --git a/lib/Driver/ToolChains/Clang.cpp b/lib/Driver/ToolChains/Clang.cpp
+index 4fec4ef9db..3c08e88bcd 100644
+--- a/lib/Driver/ToolChains/Clang.cpp
++++ b/lib/Driver/ToolChains/Clang.cpp
+@@ -12,6 +12,7 @@
+ #include "Arch/ARM.h"
+ #include "Arch/Mips.h"
+ #include "Arch/PPC.h"
++#include "Arch/RISCV.h"
+ #include "Arch/Sparc.h"
+ #include "Arch/SystemZ.h"
+ #include "Arch/X86.h"
+@@ -327,6 +328,10 @@ static void getTargetFeatures(const ToolChain &TC, const llvm::Triple &Triple,
+   case llvm::Triple::ppc64le:
+     ppc::getPPCTargetFeatures(D, Triple, Args, Features);
+     break;
++  case llvm::Triple::riscv32:
++  case llvm::Triple::riscv64:
++    riscv::getRISCVTargetFeatures(D, Args, Features);
++    break;
+   case llvm::Triple::systemz:
+     systemz::getSystemZTargetFeatures(Args, Features);
+     break;
+@@ -547,6 +552,14 @@ static bool useFramePointerForTargetByDefault(const ArgList &Args,
+     }
+   }
+ 
++  switch (Triple.getArch()) {
++    case llvm::Triple::riscv32:
++    case llvm::Triple::riscv64:
++      return !areOptimizationsEnabled(Args);
++    default:
++      break;
++  }
++
+   if (Triple.isOSWindows()) {
+     switch (Triple.getArch()) {
+     case llvm::Triple::x86:
+@@ -1282,6 +1295,8 @@ static bool isSignedCharDefault(const llvm::Triple &Triple) {
+ 
+   case llvm::Triple::hexagon:
+   case llvm::Triple::ppc64le:
++  case llvm::Triple::riscv32:
++  case llvm::Triple::riscv64:
+   case llvm::Triple::systemz:
+   case llvm::Triple::xcore:
+     return false;
+@@ -1393,6 +1408,11 @@ void Clang::RenderTargetOptions(const llvm::Triple &EffectiveTriple,
+     AddPPCTargetArgs(Args, CmdArgs);
+     break;
+ 
++  case llvm::Triple::riscv32:
++  case llvm::Triple::riscv64:
++    AddRISCVTargetArgs(Args, CmdArgs);
++    break;
++
+   case llvm::Triple::sparc:
+   case llvm::Triple::sparcel:
+   case llvm::Triple::sparcv9:
+@@ -1670,6 +1690,25 @@ void Clang::AddPPCTargetArgs(const ArgList &Args,
+   }
+ }
+ 
++void Clang::AddRISCVTargetArgs(const ArgList &Args,
++                               ArgStringList &CmdArgs) const {
++  // FIXME: currently defaults to the soft-float ABIs. Will need to be
++  // expanded to select ilp32f, ilp32d, lp64f, lp64d when appropiate.
++  const char *ABIName = nullptr;
++  const llvm::Triple &Triple = getToolChain().getTriple();
++  if (Arg *A = Args.getLastArg(options::OPT_mabi_EQ))
++    ABIName = A->getValue();
++  else if (Triple.getArch() == llvm::Triple::riscv32)
++    ABIName = "ilp32";
++  else if (Triple.getArch() == llvm::Triple::riscv64)
++    ABIName = "lp64";
++  else
++    llvm_unreachable("Unexpected triple!");
++
++  CmdArgs.push_back("-target-abi");
++  CmdArgs.push_back(ABIName);
++}
++
+ void Clang::AddSparcTargetArgs(const ArgList &Args,
+                                ArgStringList &CmdArgs) const {
+   sparc::FloatABI FloatABI =
+diff --git a/lib/Driver/ToolChains/Clang.h b/lib/Driver/ToolChains/Clang.h
+index e23822b9c6..8893d88a8c 100644
+--- a/lib/Driver/ToolChains/Clang.h
++++ b/lib/Driver/ToolChains/Clang.h
+@@ -60,6 +60,8 @@ private:
+                         llvm::opt::ArgStringList &CmdArgs) const;
+   void AddR600TargetArgs(const llvm::opt::ArgList &Args,
+                          llvm::opt::ArgStringList &CmdArgs) const;
++  void AddRISCVTargetArgs(const llvm::opt::ArgList &Args,
++                          llvm::opt::ArgStringList &CmdArgs) const;
+   void AddSparcTargetArgs(const llvm::opt::ArgList &Args,
+                           llvm::opt::ArgStringList &CmdArgs) const;
+   void AddSystemZTargetArgs(const llvm::opt::ArgList &Args,
+diff --git a/lib/Driver/ToolChains/Gnu.cpp b/lib/Driver/ToolChains/Gnu.cpp
+index 17cb675c89..fa5cfa0a0c 100644
+--- a/lib/Driver/ToolChains/Gnu.cpp
++++ b/lib/Driver/ToolChains/Gnu.cpp
+@@ -8,13 +8,14 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include "Gnu.h"
+-#include "Linux.h"
+ #include "Arch/ARM.h"
+ #include "Arch/Mips.h"
+ #include "Arch/PPC.h"
++#include "Arch/RISCV.h"
+ #include "Arch/Sparc.h"
+ #include "Arch/SystemZ.h"
+ #include "CommonArgs.h"
++#include "Linux.h"
+ #include "clang/Basic/VirtualFileSystem.h"
+ #include "clang/Config/config.h" // for GCC_INSTALL_PREFIX
+ #include "clang/Driver/Compilation.h"
+@@ -273,6 +274,10 @@ static const char *getLDMOption(const llvm::Triple &T, const ArgList &Args) {
+     return "elf64ppc";
+   case llvm::Triple::ppc64le:
+     return "elf64lppc";
++  case llvm::Triple::riscv32:
++    return "elf32lriscv";
++  case llvm::Triple::riscv64:
++    return "elf64lriscv";
+   case llvm::Triple::sparc:
+   case llvm::Triple::sparcel:
+     return "elf32_sparc";
+@@ -856,6 +861,10 @@ static bool isMicroMips(const ArgList &Args) {
+   return A && A->getOption().matches(options::OPT_mmicromips);
+ }
+ 
++static bool isRISCV(llvm::Triple::ArchType Arch) {
++  return Arch == llvm::Triple::riscv32 || Arch == llvm::Triple::riscv64;
++}
++
+ static Multilib makeMultilib(StringRef commonSuffix) {
+   return Multilib(commonSuffix, commonSuffix, commonSuffix);
+ }
+@@ -1401,6 +1410,41 @@ static void findAndroidArmMultilibs(const Driver &D,
+     Result.Multilibs = AndroidArmMultilibs;
+ }
+ 
++static void findRISCVMultilibs(const Driver &D,
++                               const llvm::Triple &TargetTriple, StringRef Path,
++                               const ArgList &Args, DetectedMultilibs &Result) {
++
++  FilterNonExistent NonExistent(Path, "/crtbegin.o", D.getVFS());
++  Multilib Ilp32 = makeMultilib("lib32/ilp32").flag("+m32").flag("+mabi=ilp32");
++  Multilib Ilp32f =
++      makeMultilib("lib32/ilp32f").flag("+m32").flag("+mabi=ilp32f");
++  Multilib Ilp32d =
++      makeMultilib("lib32/ilp32d").flag("+m32").flag("+mabi=ilp32d");
++  Multilib Lp64 = makeMultilib("lib64/lp64").flag("+m64").flag("+mabi=lp64");
++  Multilib Lp64f = makeMultilib("lib64/lp64f").flag("+m64").flag("+mabi=lp64f");
++  Multilib Lp64d = makeMultilib("lib64/lp64d").flag("+m64").flag("+mabi=lp64d");
++  MultilibSet RISCVMultilibs =
++      MultilibSet()
++          .Either({Ilp32, Ilp32f, Ilp32d, Lp64, Lp64f, Lp64d})
++          .FilterOut(NonExistent);
++
++  Multilib::flags_list Flags;
++  bool IsRV64 = TargetTriple.getArch() == llvm::Triple::riscv64;
++  StringRef ABIName = tools::riscv::getRISCVABI(Args, TargetTriple);
++
++  addMultilibFlag(!IsRV64, "m32", Flags);
++  addMultilibFlag(IsRV64, "m64", Flags);
++  addMultilibFlag(ABIName == "ilp32", "mabi=ilp32", Flags);
++  addMultilibFlag(ABIName == "ilp32f", "mabi=ilp32f", Flags);
++  addMultilibFlag(ABIName == "ilp32d", "mabi=ilp32d", Flags);
++  addMultilibFlag(ABIName == "lp64", "mabi=lp64", Flags);
++  addMultilibFlag(ABIName == "lp64f", "mabi=lp64f", Flags);
++  addMultilibFlag(ABIName == "lp64d", "mabi=lp64d", Flags);
++
++  if (RISCVMultilibs.select(Flags, Result.SelectedMultilib))
++    Result.Multilibs = RISCVMultilibs;
++}
++
+ static bool findBiarchMultilibs(const Driver &D,
+                                 const llvm::Triple &TargetTriple,
+                                 StringRef Path, const ArgList &Args,
+@@ -1839,6 +1883,10 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
+       "powerpc64le-linux-gnu", "powerpc64le-unknown-linux-gnu",
+       "powerpc64le-suse-linux", "ppc64le-redhat-linux"};
+ 
++  static const char *const RISCV32LibDirs[] = {"/lib", "/lib32"};
++  static const char *const RISCVTriples[] = {"riscv32-unknown-linux-gnu",
++                                             "riscv64-unknown-linux-gnu"};
++
+   static const char *const SPARCv8LibDirs[] = {"/lib32", "/lib"};
+   static const char *const SPARCv8Triples[] = {"sparc-linux-gnu",
+                                                "sparcv8-linux-gnu"};
+@@ -2016,6 +2064,12 @@ void Generic_GCC::GCCInstallationDetector::AddDefaultGCCPrefixes(
+     LibDirs.append(begin(PPC64LELibDirs), end(PPC64LELibDirs));
+     TripleAliases.append(begin(PPC64LETriples), end(PPC64LETriples));
+     break;
++  case llvm::Triple::riscv32:
++    LibDirs.append(begin(RISCV32LibDirs), end(RISCV32LibDirs));
++    BiarchLibDirs.append(begin(RISCV32LibDirs), end(RISCV32LibDirs));
++    TripleAliases.append(begin(RISCVTriples), end(RISCVTriples));
++    BiarchTripleAliases.append(begin(RISCVTriples), end(RISCVTriples));
++    break;
+   case llvm::Triple::sparc:
+   case llvm::Triple::sparcel:
+     LibDirs.append(begin(SPARCv8LibDirs), end(SPARCv8LibDirs));
+@@ -2063,6 +2117,8 @@ bool Generic_GCC::GCCInstallationDetector::ScanGCCForMultilibs(
+   } else if (tools::isMipsArch(TargetArch)) {
+     if (!findMIPSMultilibs(D, TargetTriple, Path, Args, Detected))
+       return false;
++  } else if (isRISCV(TargetArch)) {
++    findRISCVMultilibs(D, TargetTriple, Path, Args, Detected);
+   } else if (!findBiarchMultilibs(D, TargetTriple, Path, Args,
+                                   NeedsBiarchSuffix, Detected)) {
+     return false;
+@@ -2274,6 +2330,8 @@ bool Generic_GCC::IsIntegratedAssemblerDefault() const {
+   case llvm::Triple::ppc:
+   case llvm::Triple::ppc64:
+   case llvm::Triple::ppc64le:
++  case llvm::Triple::riscv32:
++  case llvm::Triple::riscv64:
+   case llvm::Triple::systemz:
+   case llvm::Triple::mips:
+   case llvm::Triple::mipsel:
+diff --git a/lib/Driver/ToolChains/Linux.cpp b/lib/Driver/ToolChains/Linux.cpp
+index 236591bb56..4e9d0f1f9f 100644
+--- a/lib/Driver/ToolChains/Linux.cpp
++++ b/lib/Driver/ToolChains/Linux.cpp
+@@ -11,6 +11,7 @@
+ #include "Arch/ARM.h"
+ #include "Arch/Mips.h"
+ #include "Arch/PPC.h"
++#include "Arch/RISCV.h"
+ #include "CommonArgs.h"
+ #include "clang/Basic/VirtualFileSystem.h"
+ #include "clang/Config/config.h"
+@@ -176,6 +177,9 @@ static StringRef getOSLibDir(const llvm::Triple &Triple, const ArgList &Args) {
+       Triple.getEnvironment() == llvm::Triple::GNUX32)
+     return "libx32";
+ 
++  if (Triple.getArch() == llvm::Triple::riscv32)
++    return "lib32";
++
+   return Triple.isArch32Bit() ? "lib" : "lib64";
+ }
+ 
+@@ -226,6 +230,8 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
+   const bool IsAndroid = Triple.isAndroid();
+   const bool IsMips = tools::isMipsArch(Arch);
+   const bool IsHexagon = Arch == llvm::Triple::hexagon;
++  const bool IsRISCV =
++      Arch == llvm::Triple::riscv32 || Arch == llvm::Triple::riscv64;
+ 
+   if (IsMips && !SysRoot.empty())
+     ExtraOpts.push_back("--sysroot=" + SysRoot);
+@@ -333,6 +339,11 @@ Linux::Linux(const Driver &D, const llvm::Triple &Triple, const ArgList &Args)
+   addPathIfExists(D, SysRoot + "/lib/../" + OSLibDir, Paths);
+   addPathIfExists(D, SysRoot + "/usr/lib/" + MultiarchTriple, Paths);
+   addPathIfExists(D, SysRoot + "/usr/lib/../" + OSLibDir, Paths);
++  if (IsRISCV) {
++    StringRef ABIName = tools::riscv::getRISCVABI(Args, Triple);
++    addPathIfExists(D, SysRoot + "/" + OSLibDir + "/" + ABIName, Paths);
++    addPathIfExists(D, SysRoot + "/usr/" + OSLibDir + "/" + ABIName, Paths);
++  }
+ 
+   // Try walking via the GCC triple path in case of biarch or multiarch GCC
+   // installations with strange symlinks.
+@@ -511,6 +522,18 @@ std::string Linux::getDynamicLinker(const ArgList &Args) const {
+     Loader =
+         (tools::ppc::hasPPCAbiArg(Args, "elfv1")) ? "ld64.so.1" : "ld64.so.2";
+     break;
++  case llvm::Triple::riscv32: {
++    StringRef ABIName = tools::riscv::getRISCVABI(Args, Triple);
++    LibDir = "lib";
++    Loader = ("ld-linux-riscv32-" + ABIName + ".so.1").str();
++    break;
++  }
++  case llvm::Triple::riscv64: {
++    StringRef ABIName = tools::riscv::getRISCVABI(Args, Triple);
++    LibDir = "lib";
++    Loader = ("ld-linux-riscv64-" + ABIName + ".so.1").str();
++    break;
++  }
+   case llvm::Triple::sparc:
+   case llvm::Triple::sparcel:
+     LibDir = "lib";
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/bin/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/bin/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/include/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/include/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/crtbegin.o b/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/crtbegin.o
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32/crtbegin.o b/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32/crtbegin.o
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32d/crtbegin.o b/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32d/crtbegin.o
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib64/lp64/crtbegin.o b/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib64/lp64/crtbegin.o
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib64/lp64d/crtbegin.o b/test/Driver/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib64/lp64d/crtbegin.o
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/riscv64-unknown-linux-gnu/bin/ld b/test/Driver/Inputs/multilib_riscv_linux_sdk/riscv64-unknown-linux-gnu/bin/ld
+new file mode 100755
+index 0000000000..b23e55619b
+--- /dev/null
++++ b/test/Driver/Inputs/multilib_riscv_linux_sdk/riscv64-unknown-linux-gnu/bin/ld
+@@ -0,0 +1 @@
++#!/bin/true
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib32/ilp32/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib32/ilp32/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib32/ilp32d/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib32/ilp32d/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib64/lp64/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib64/lp64/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib64/lp64d/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/lib64/lp64d/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib32/ilp32/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib32/ilp32/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib32/ilp32d/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib32/ilp32d/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib64/lp64/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib64/lp64/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib64/lp64d/.keep b/test/Driver/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib64/lp64d/.keep
+new file mode 100644
+index 0000000000..e69de29bb2
+diff --git a/test/Driver/frame-pointer.c b/test/Driver/frame-pointer.c
+index ecb16af3cf..cf5c07d542 100644
+--- a/test/Driver/frame-pointer.c
++++ b/test/Driver/frame-pointer.c
+@@ -33,6 +33,18 @@
+ // RUN: %clang -target mips64el-linux-gnu -### -S -O0 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK0-32 %s
+ // RUN: %clang -target mips64el-linux-gnu -### -S -O1 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK1-32 %s
+ 
++// RUN: %clang -target riscv32-unknown-elf -### -S -O0 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK0-32 %s
++// RUN: %clang -target riscv32-unknown-elf -### -S -O1 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK1-32 %s
++// RUN: %clang -target riscv32-unknown-elf -### -S -O2 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK2-32 %s
++// RUN: %clang -target riscv32-unknown-elf -### -S -O3 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK3-32 %s
++// RUN: %clang -target riscv32-unknown-elf -### -S -Os %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECKs-32 %s
++
++// RUN: %clang -target riscv64-unknown-elf -### -S -O0 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK0-64 %s
++// RUN: %clang -target riscv64-unknown-elf -### -S -O1 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK1-64 %s
++// RUN: %clang -target riscv64-unknown-elf -### -S -O2 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK2-64 %s
++// RUN: %clang -target riscv64-unknown-elf -### -S -O3 %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECK3-64 %s
++// RUN: %clang -target riscv64-unknown-elf -### -S -Os %s -o %t.s 2>&1 | FileCheck -check-prefix=CHECKs-64 %s
++
+ // CHECK0-32: -mdisable-fp-elim
+ // CHECK1-32-NOT: -mdisable-fp-elim
+ // CHECK2-32-NOT: -mdisable-fp-elim
+diff --git a/test/Driver/riscv-abi.c b/test/Driver/riscv-abi.c
+new file mode 100644
+index 0000000000..8b79c8462b
+--- /dev/null
++++ b/test/Driver/riscv-abi.c
+@@ -0,0 +1,47 @@
++// RUN: %clang -target riscv32-unknown-elf %s -### -o %t.o 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-ILP32 %s
++// RUN: %clang -target riscv32-unknown-elf %s -### -o %t.o -mabi=ilp32 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-ILP32 %s
++
++// CHECK-ILP32: "-target-abi" "ilp32"
++
++// TODO: ilp32f support.
++// RUN: not %clang -target riscv32-unknown-elf %s -o %t.o -mabi=ilp32f 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-ILP32F %s
++
++// CHECK-ILP32F: error: unknown target ABI 'ilp32f'
++
++// TODO: ilp32d support.
++// RUN: not %clang -target riscv32-unknown-elf %s -o %t.o -mabi=ilp32d 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-ILP32D %s
++
++// CHECK-ILP32D: error: unknown target ABI 'ilp32d'
++
++// RUN: not %clang -target riscv32-unknown-elf %s -o %t.o -mabi=lp64 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-RV32-LP64 %s
++
++// CHECK-RV32-LP64: error: unknown target ABI 'lp64'
++
++// RUN: %clang -target riscv64-unknown-elf %s -### -o %t.o 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-LP64 %s
++// RUN: %clang -target riscv64-unknown-elf %s -### -o %t.o -mabi=lp64 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-LP64 %s
++
++// CHECK-LP64: "-target-abi" "lp64"
++
++// TODO: lp64f support.
++// RUN: not %clang -target riscv64-unknown-elf %s -o %t.o -mabi=lp64f 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-LP64F %s
++
++// CHECK-LP64F: error: unknown target ABI 'lp64f'
++
++// TODO: lp64d support.
++// RUN: not %clang -target riscv64-unknown-elf %s -o %t.o -mabi=lp64d 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-LP64D %s
++
++// CHECK-LP64D: error: unknown target ABI 'lp64d'
++
++// RUN: not %clang -target riscv64-unknown-elf %s -o %t.o -mabi=ilp32 2>&1 \
++// RUN:   | FileCheck -check-prefix=CHECK-RV64-ILP32 %s
++
++// CHECK-RV64-ILP32: error: unknown target ABI 'ilp32'
+diff --git a/test/Driver/riscv-features.c b/test/Driver/riscv-features.c
+new file mode 100644
+index 0000000000..565596cdd3
+--- /dev/null
++++ b/test/Driver/riscv-features.c
+@@ -0,0 +1,4 @@
++// RUN: %clang -target riscv32-unknown-elf -### %s -fsyntax-only 2>&1 | FileCheck %s
++// RUN: %clang -target riscv64-unknown-elf -### %s -fsyntax-only 2>&1 | FileCheck %s
++
++// CHECK: fno-signed-char
+diff --git a/test/Driver/riscv32-toolchain.c b/test/Driver/riscv32-toolchain.c
+new file mode 100644
+index 0000000000..efe550e0f2
+--- /dev/null
++++ b/test/Driver/riscv32-toolchain.c
+@@ -0,0 +1,75 @@
++// A basic clang -cc1 command-line, and simple environment check.
++
++// RUN: %clang %s -### -no-canonical-prefixes -target riscv32 2>&1 | FileCheck -check-prefix=CC1 %s
++// CC1: clang{{.*}} "-cc1" "-triple" "riscv32"
++
++
++// RUN: %clang %s -### -no-canonical-prefixes -fuse-ld=ld \
++// RUN:   -target riscv32-linux-unknown-elf \
++// RUN:   --gcc-toolchain=%S/Inputs/multilib_riscv_linux_sdk \
++// RUN:   --sysroot=%S/Inputs/multilib_riscv_linux_sdk/sysroot 2>&1 \
++// RUN:   | FileCheck -check-prefix=CC1-RV32-LINUX-ILP32 %s
++
++// CC1-RV32-LINUX-ILP32: "{{.*}}/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/../../../../riscv64-unknown-linux-gnu/bin{{/|\\\\}}ld"
++// CC1-RV32-LINUX-ILP32: "--sysroot={{.*}}/Inputs/multilib_riscv_linux_sdk/sysroot"
++// CC1-RV32-LINUX-ILP32: "-m" "elf32lriscv"
++// CC1-RV32-LINUX-ILP32: "-dynamic-linker" "/lib/ld-linux-riscv32-ilp32.so.1"
++// CC1-RV32-LINUX-ILP32: "{{.*}}/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32{{/|\\\\}}crtbegin.o"
++// CC1-RV32-LINUX-ILP32: "-L{{.*}}/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32"
++// CC1-RV32-LINUX-ILP32: "-L{{.*}}/Inputs/multilib_riscv_linux_sdk/sysroot/lib32/ilp32"
++// CC1-RV32-LINUX-ILP32: "-L{{.*}}/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib32/ilp32"
++
++// RUN: %clang %s -### -no-canonical-prefixes -fuse-ld=ld \
++// RUN:   -target riscv32-linux-unknown-elf -march=rv32imafd -mabi=ilp32d \
++// RUN:   --gcc-toolchain=%S/Inputs/multilib_riscv_linux_sdk \
++// RUN:   --sysroot=%S/Inputs/multilib_riscv_linux_sdk/sysroot 2>&1 \
++// RUN:   | FileCheck -check-prefix=CC1-RV32-LINUX-ILP32D %s
++
++// CC1-RV32-LINUX-ILP32D: "{{.*}}/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/../../../../riscv64-unknown-linux-gnu/bin{{/|\\\\}}ld"
++// CC1-RV32-LINUX-ILP32D: "--sysroot={{.*}}/Inputs/multilib_riscv_linux_sdk/sysroot"
++// CC1-RV32-LINUX-ILP32D: "-m" "elf32lriscv"
++// CC1-RV32-LINUX-ILP32D: "-dynamic-linker" "/lib/ld-linux-riscv32-ilp32d.so.1"
++// CC1-RV32-LINUX-ILP32D: "{{.*}}/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32d{{/|\\\\}}crtbegin.o"
++// CC1-RV32-LINUX-ILP32D: "-L{{.*}}/Inputs/multilib_riscv_linux_sdk/lib/gcc/riscv64-unknown-linux-gnu/7.2.0/lib32/ilp32d"
++// CC1-RV32-LINUX-ILP32D: "-L{{.*}}/Inputs/multilib_riscv_linux_sdk/sysroot/lib32/ilp32d"
++// CC1-RV32-LINUX-ILP32D: "-L{{.*}}/Inputs/multilib_riscv_linux_sdk/sysroot/usr/lib32/ilp32d"
++
++// RUN: %clang -target riscv32 %s -emit-llvm -S -o - | FileCheck %s
++
++typedef __builtin_va_list va_list;
++typedef __SIZE_TYPE__ size_t;
++typedef __PTRDIFF_TYPE__ ptrdiff_t;
++typedef __WCHAR_TYPE__ wchar_t;
++
++// CHECK: @align_c = global i32 1
++int align_c = __alignof(char);
++
++// CHECK: @align_s = global i32 2
++int align_s = __alignof(short);
++
++// CHECK: @align_i = global i32 4
++int align_i = __alignof(int);
++
++// CHECK: @align_wc = global i32 4
++int align_wc = __alignof(wchar_t);
++
++// CHECK: @align_l = global i32 4
++int align_l = __alignof(long);
++
++// CHECK: @align_ll = global i32 8
++int align_ll = __alignof(long long);
++
++// CHECK: @align_p = global i32 4
++int align_p = __alignof(void*);
++
++// CHECK: @align_f = global i32 4
++int align_f = __alignof(float);
++
++// CHECK: @align_d = global i32 8
++int align_d = __alignof(double);
++
++// CHECK: @align_ld = global i32 16
++int align_ld = __alignof(long double);
++
++// CHECK: @align_vl = global i32 4
++int align_vl = __alignof(va_list);
+diff --git a/test/Driver/riscv64-toolchain.c b/test/Driver/riscv64-toolchain.c
+new file mode 100644
+index 0000000000..5c7d76006c
+--- /dev/null
++++ b/test/Driver/riscv64-toolchain.c
+@@ -0,0 +1,44 @@
++// A basic clang -cc1 command-line, and simple environment check.
++
++// RUN: %clang %s -### -no-canonical-prefixes -target riscv64 2>&1 | FileCheck -check-prefix=CC1 %s
++// CC1: clang{{.*}} "-cc1" "-triple" "riscv64"
++
++// RUN: %clang -target riscv64 %s -emit-llvm -S -o - | FileCheck %s
++
++typedef __builtin_va_list va_list;
++typedef __SIZE_TYPE__ size_t;
++typedef __PTRDIFF_TYPE__ ptrdiff_t;
++typedef __WCHAR_TYPE__ wchar_t;
++
++// CHECK: @align_c = global i32 1
++int align_c = __alignof(char);
++
++// CHECK: @align_s = global i32 2
++int align_s = __alignof(short);
++
++// CHECK: @align_i = global i32 4
++int align_i = __alignof(int);
++
++// CHECK: @align_wc = global i32 4
++int align_wc = __alignof(wchar_t);
++
++// CHECK: @align_l = global i32 8
++int align_l = __alignof(long);
++
++// CHECK: @align_ll = global i32 8
++int align_ll = __alignof(long long);
++
++// CHECK: @align_p = global i32 8
++int align_p = __alignof(void*);
++
++// CHECK: @align_f = global i32 4
++int align_f = __alignof(float);
++
++// CHECK: @align_d = global i32 8
++int align_d = __alignof(double);
++
++// CHECK: @align_ld = global i32 16
++int align_ld = __alignof(long double);
++
++// CHECK: @align_vl = global i32 8
++int align_vl = __alignof(va_list);
+diff --git a/test/Preprocessor/init.c b/test/Preprocessor/init.c
+index 9fd39e6006..eaa0506a91 100644
+--- a/test/Preprocessor/init.c
++++ b/test/Preprocessor/init.c
+@@ -10006,3 +10006,416 @@
+ // ARM-DARWIN-BAREMETAL-64: #define __PTRDIFF_TYPE__ long int
+ // ARM-DARWIN-BAREMETAL-64: #define __SIZE_TYPE__ long unsigned int
+ 
++// RUN: %clang_cc1 -E -dM -ffreestanding -triple=riscv32 < /dev/null \
++// RUN:   | FileCheck -match-full-lines -check-prefix=RISCV32 %s
++// RUN: %clang_cc1 -E -dM -ffreestanding -triple=riscv32-unknown-linux < /dev/null \
++// RUN:   | FileCheck -match-full-lines -check-prefixes=RISCV32,RISCV32-LINUX %s
++// RISCV32: #define _ILP32 1
++// RISCV32: #define __ATOMIC_ACQUIRE 2
++// RISCV32: #define __ATOMIC_ACQ_REL 4
++// RISCV32: #define __ATOMIC_CONSUME 1
++// RISCV32: #define __ATOMIC_RELAXED 0
++// RISCV32: #define __ATOMIC_RELEASE 3
++// RISCV32: #define __ATOMIC_SEQ_CST 5
++// RISCV32: #define __BIGGEST_ALIGNMENT__ 16
++// RISCV32: #define __BYTE_ORDER__ __ORDER_LITTLE_ENDIAN__
++// RISCV32: #define __CHAR16_TYPE__ unsigned short
++// RISCV32: #define __CHAR32_TYPE__ unsigned int
++// RISCV32: #define __CHAR_BIT__ 8
++// RISCV32: #define __DBL_DECIMAL_DIG__ 17
++// RISCV32: #define __DBL_DENORM_MIN__ 4.9406564584124654e-324
++// RISCV32: #define __DBL_DIG__ 15
++// RISCV32: #define __DBL_EPSILON__ 2.2204460492503131e-16
++// RISCV32: #define __DBL_HAS_DENORM__ 1
++// RISCV32: #define __DBL_HAS_INFINITY__ 1
++// RISCV32: #define __DBL_HAS_QUIET_NAN__ 1
++// RISCV32: #define __DBL_MANT_DIG__ 53
++// RISCV32: #define __DBL_MAX_10_EXP__ 308
++// RISCV32: #define __DBL_MAX_EXP__ 1024
++// RISCV32: #define __DBL_MAX__ 1.7976931348623157e+308
++// RISCV32: #define __DBL_MIN_10_EXP__ (-307)
++// RISCV32: #define __DBL_MIN_EXP__ (-1021)
++// RISCV32: #define __DBL_MIN__ 2.2250738585072014e-308
++// RISCV32: #define __DECIMAL_DIG__ __LDBL_DECIMAL_DIG__
++// RISCV32: #define __ELF__ 1
++// RISCV32: #define __FINITE_MATH_ONLY__ 0
++// RISCV32: #define __FLT_DECIMAL_DIG__ 9
++// RISCV32: #define __FLT_DENORM_MIN__ 1.40129846e-45F
++// RISCV32: #define __FLT_DIG__ 6
++// RISCV32: #define __FLT_EPSILON__ 1.19209290e-7F
++// RISCV32: #define __FLT_EVAL_METHOD__ 0
++// RISCV32: #define __FLT_HAS_DENORM__ 1
++// RISCV32: #define __FLT_HAS_INFINITY__ 1
++// RISCV32: #define __FLT_HAS_QUIET_NAN__ 1
++// RISCV32: #define __FLT_MANT_DIG__ 24
++// RISCV32: #define __FLT_MAX_10_EXP__ 38
++// RISCV32: #define __FLT_MAX_EXP__ 128
++// RISCV32: #define __FLT_MAX__ 3.40282347e+38F
++// RISCV32: #define __FLT_MIN_10_EXP__ (-37)
++// RISCV32: #define __FLT_MIN_EXP__ (-125)
++// RISCV32: #define __FLT_MIN__ 1.17549435e-38F
++// RISCV32: #define __FLT_RADIX__ 2
++// RISCV32: #define __GCC_ATOMIC_BOOL_LOCK_FREE 1
++// RISCV32: #define __GCC_ATOMIC_CHAR16_T_LOCK_FREE 1
++// RISCV32: #define __GCC_ATOMIC_CHAR32_T_LOCK_FREE 1
++// RISCV32: #define __GCC_ATOMIC_CHAR_LOCK_FREE 1
++// RISCV32: #define __GCC_ATOMIC_INT_LOCK_FREE 1
++// RISCV32: #define __GCC_ATOMIC_LLONG_LOCK_FREE 1
++// RISCV32: #define __GCC_ATOMIC_LONG_LOCK_FREE 1
++// RISCV32: #define __GCC_ATOMIC_POINTER_LOCK_FREE 1
++// RISCV32: #define __GCC_ATOMIC_SHORT_LOCK_FREE 1
++// RISCV32: #define __GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1
++// RISCV32: #define __GCC_ATOMIC_WCHAR_T_LOCK_FREE 1
++// RISCV32: #define __GNUC_MINOR__ {{.*}}
++// RISCV32: #define __GNUC_PATCHLEVEL__ {{.*}}
++// RISCV32: #define __GNUC_STDC_INLINE__ 1
++// RISCV32: #define __GNUC__ {{.*}}
++// RISCV32: #define __GXX_ABI_VERSION {{.*}}
++// RISCV32: #define __ILP32__ 1
++// RISCV32: #define __INT16_C_SUFFIX__
++// RISCV32: #define __INT16_MAX__ 32767
++// RISCV32: #define __INT16_TYPE__ short
++// RISCV32: #define __INT32_C_SUFFIX__
++// RISCV32: #define __INT32_MAX__ 2147483647
++// RISCV32: #define __INT32_TYPE__ int
++// RISCV32: #define __INT64_C_SUFFIX__ LL
++// RISCV32: #define __INT64_MAX__ 9223372036854775807LL
++// RISCV32: #define __INT64_TYPE__ long long int
++// RISCV32: #define __INT8_C_SUFFIX__
++// RISCV32: #define __INT8_MAX__ 127
++// RISCV32: #define __INT8_TYPE__ signed char
++// RISCV32: #define __INTMAX_C_SUFFIX__ LL
++// RISCV32: #define __INTMAX_MAX__ 9223372036854775807LL
++// RISCV32: #define __INTMAX_TYPE__ long long int
++// RISCV32: #define __INTMAX_WIDTH__ 64
++// RISCV32: #define __INTPTR_MAX__ 2147483647
++// RISCV32: #define __INTPTR_TYPE__ int
++// RISCV32: #define __INTPTR_WIDTH__ 32
++// TODO: RISC-V GCC defines INT_FAST16 as int
++// RISCV32: #define __INT_FAST16_MAX__ 32767
++// RISCV32: #define __INT_FAST16_TYPE__ short
++// RISCV32: #define __INT_FAST32_MAX__ 2147483647
++// RISCV32: #define __INT_FAST32_TYPE__ int
++// RISCV32: #define __INT_FAST64_MAX__ 9223372036854775807LL
++// RISCV32: #define __INT_FAST64_TYPE__ long long int
++// TODO: RISC-V GCC defines INT_FAST8 as int
++// RISCV32: #define __INT_FAST8_MAX__ 127
++// RISCV32: #define __INT_FAST8_TYPE__ signed char
++// RISCV32: #define __INT_LEAST16_MAX__ 32767
++// RISCV32: #define __INT_LEAST16_TYPE__ short
++// RISCV32: #define __INT_LEAST32_MAX__ 2147483647
++// RISCV32: #define __INT_LEAST32_TYPE__ int
++// RISCV32: #define __INT_LEAST64_MAX__ 9223372036854775807LL
++// RISCV32: #define __INT_LEAST64_TYPE__ long long int
++// RISCV32: #define __INT_LEAST8_MAX__ 127
++// RISCV32: #define __INT_LEAST8_TYPE__ signed char
++// RISCV32: #define __INT_MAX__ 2147483647
++// RISCV32: #define __LDBL_DECIMAL_DIG__ 36
++// RISCV32: #define __LDBL_DENORM_MIN__ 6.47517511943802511092443895822764655e-4966L
++// RISCV32: #define __LDBL_DIG__ 33
++// RISCV32: #define __LDBL_EPSILON__ 1.92592994438723585305597794258492732e-34L
++// RISCV32: #define __LDBL_HAS_DENORM__ 1
++// RISCV32: #define __LDBL_HAS_INFINITY__ 1
++// RISCV32: #define __LDBL_HAS_QUIET_NAN__ 1
++// RISCV32: #define __LDBL_MANT_DIG__ 113
++// RISCV32: #define __LDBL_MAX_10_EXP__ 4932
++// RISCV32: #define __LDBL_MAX_EXP__ 16384
++// RISCV32: #define __LDBL_MAX__ 1.18973149535723176508575932662800702e+4932L
++// RISCV32: #define __LDBL_MIN_10_EXP__ (-4931)
++// RISCV32: #define __LDBL_MIN_EXP__ (-16381)
++// RISCV32: #define __LDBL_MIN__ 3.36210314311209350626267781732175260e-4932L
++// RISCV32: #define __LITTLE_ENDIAN__ 1
++// RISCV32: #define __LONG_LONG_MAX__ 9223372036854775807LL
++// RISCV32: #define __LONG_MAX__ 2147483647L
++// RISCV32: #define __NO_INLINE__ 1
++// RISCV32: #define __POINTER_WIDTH__ 32
++// RISCV32: #define __PRAGMA_REDEFINE_EXTNAME 1
++// RISCV32: #define __PTRDIFF_MAX__ 2147483647
++// RISCV32: #define __PTRDIFF_TYPE__ int
++// RISCV32: #define __PTRDIFF_WIDTH__ 32
++// RISCV32: #define __SCHAR_MAX__ 127
++// RISCV32: #define __SHRT_MAX__ 32767
++// RISCV32: #define __SIG_ATOMIC_MAX__ 2147483647
++// RISCV32: #define __SIG_ATOMIC_WIDTH__ 32
++// RISCV32: #define __SIZEOF_DOUBLE__ 8
++// RISCV32: #define __SIZEOF_FLOAT__ 4
++// RISCV32: #define __SIZEOF_INT__ 4
++// RISCV32: #define __SIZEOF_LONG_DOUBLE__ 16
++// RISCV32: #define __SIZEOF_LONG_LONG__ 8
++// RISCV32: #define __SIZEOF_LONG__ 4
++// RISCV32: #define __SIZEOF_POINTER__ 4
++// RISCV32: #define __SIZEOF_PTRDIFF_T__ 4
++// RISCV32: #define __SIZEOF_SHORT__ 2
++// RISCV32: #define __SIZEOF_SIZE_T__ 4
++// RISCV32: #define __SIZEOF_WCHAR_T__ 4
++// RISCV32: #define __SIZEOF_WINT_T__ 4
++// RISCV32: #define __SIZE_MAX__ 4294967295U
++// RISCV32: #define __SIZE_TYPE__ unsigned int
++// RISCV32: #define __SIZE_WIDTH__ 32
++// RISCV32: #define __STDC_HOSTED__ 0
++// RISCV32: #define __STDC_UTF_16__ 1
++// RISCV32: #define __STDC_UTF_32__ 1
++// RISCV32: #define __STDC_VERSION__ 201112L
++// RISCV32: #define __STDC__ 1
++// RISCV32: #define __UINT16_C_SUFFIX__
++// RISCV32: #define __UINT16_MAX__ 65535
++// RISCV32: #define __UINT16_TYPE__ unsigned short
++// RISCV32: #define __UINT32_C_SUFFIX__ U
++// RISCV32: #define __UINT32_MAX__ 4294967295U
++// RISCV32: #define __UINT32_TYPE__ unsigned int
++// RISCV32: #define __UINT64_C_SUFFIX__ ULL
++// RISCV32: #define __UINT64_MAX__ 18446744073709551615ULL
++// RISCV32: #define __UINT64_TYPE__ long long unsigned int
++// RISCV32: #define __UINT8_C_SUFFIX__
++// RISCV32: #define __UINT8_MAX__ 255
++// RISCV32: #define __UINT8_TYPE__ unsigned char
++// RISCV32: #define __UINTMAX_C_SUFFIX__ ULL
++// RISCV32: #define __UINTMAX_MAX__ 18446744073709551615ULL
++// RISCV32: #define __UINTMAX_TYPE__ long long unsigned int
++// RISCV32: #define __UINTMAX_WIDTH__ 64
++// RISCV32: #define __UINTPTR_MAX__ 4294967295U
++// RISCV32: #define __UINTPTR_TYPE__ unsigned int
++// RISCV32: #define __UINTPTR_WIDTH__ 32
++// TODO: RISC-V GCC defines UINT_FAST16 to be unsigned int
++// RISCV32: #define __UINT_FAST16_MAX__ 65535
++// RISCV32: #define __UINT_FAST16_TYPE__ unsigned short
++// RISCV32: #define __UINT_FAST32_MAX__ 4294967295U
++// RISCV32: #define __UINT_FAST32_TYPE__ unsigned int
++// RISCV32: #define __UINT_FAST64_MAX__ 18446744073709551615ULL
++// RISCV32: #define __UINT_FAST64_TYPE__ long long unsigned int
++// TODO: RISC-V GCC defines UINT_FAST8 to be unsigned int
++// RISCV32: #define __UINT_FAST8_MAX__ 255
++// RISCV32: #define __UINT_FAST8_TYPE__ unsigned char
++// RISCV32: #define __UINT_LEAST16_MAX__ 65535
++// RISCV32: #define __UINT_LEAST16_TYPE__ unsigned short
++// RISCV32: #define __UINT_LEAST32_MAX__ 4294967295U
++// RISCV32: #define __UINT_LEAST32_TYPE__ unsigned int
++// RISCV32: #define __UINT_LEAST64_MAX__ 18446744073709551615ULL
++// RISCV32: #define __UINT_LEAST64_TYPE__ long long unsigned int
++// RISCV32: #define __UINT_LEAST8_MAX__ 255
++// RISCV32: #define __UINT_LEAST8_TYPE__ unsigned char
++// RISCV32: #define __USER_LABEL_PREFIX__
++// RISCV32: #define __WCHAR_MAX__ 2147483647
++// RISCV32: #define __WCHAR_TYPE__ int
++// RISCV32: #define __WCHAR_WIDTH__ 32
++// RISCV32: #define __WINT_TYPE__ unsigned int
++// RISCV32: #define __WINT_UNSIGNED__ 1
++// RISCV32: #define __WINT_WIDTH__ 32
++// RISCV32-LINUX: #define __gnu_linux__ 1
++// RISCV32-LINUX: #define __linux 1
++// RISCV32-LINUX: #define __linux__ 1
++// RISCV32: #define __riscv 1
++// RISCV32: #define __riscv_cmodel_medlow 1
++// RISCV32: #define __riscv_float_abi_soft 1
++// RISCV32: #define __riscv_xlen 32
++// RISCV32-LINUX: #define __unix 1
++// RISCV32-LINUX: #define __unix__ 1
++// RISCV32-LINUX: #define linux 1
++// RISCV32-LINUX: #define unix 1
++
++// RUN: %clang_cc1 -E -dM -ffreestanding -triple=riscv64 < /dev/null \
++// RUN:   | FileCheck -match-full-lines -check-prefix=RISCV64 %s
++// RUN: %clang_cc1 -E -dM -ffreestanding -triple=riscv64-unknown-linux < /dev/null \
++// RUN:   | FileCheck -match-full-lines -check-prefixes=RISCV64,RISCV64-LINUX %s
++// RISCV64: #define _LP64 1
++// RISCV64: #define __ATOMIC_ACQUIRE 2
++// RISCV64: #define __ATOMIC_ACQ_REL 4
++// RISCV64: #define __ATOMIC_CONSUME 1
++// RISCV64: #define __ATOMIC_RELAXED 0
++// RISCV64: #define __ATOMIC_RELEASE 3
++// RISCV64: #define __ATOMIC_SEQ_CST 5
++// RISCV64: #define __BIGGEST_ALIGNMENT__ 16
++// RISCV64: #define __BYTE_ORDER__ __ORDER_LITTLE_ENDIAN__
++// RISCV64: #define __CHAR16_TYPE__ unsigned short
++// RISCV64: #define __CHAR32_TYPE__ unsigned int
++// RISCV64: #define __CHAR_BIT__ 8
++// RISCV64: #define __DBL_DECIMAL_DIG__ 17
++// RISCV64: #define __DBL_DENORM_MIN__ 4.9406564584124654e-324
++// RISCV64: #define __DBL_DIG__ 15
++// RISCV64: #define __DBL_EPSILON__ 2.2204460492503131e-16
++// RISCV64: #define __DBL_HAS_DENORM__ 1
++// RISCV64: #define __DBL_HAS_INFINITY__ 1
++// RISCV64: #define __DBL_HAS_QUIET_NAN__ 1
++// RISCV64: #define __DBL_MANT_DIG__ 53
++// RISCV64: #define __DBL_MAX_10_EXP__ 308
++// RISCV64: #define __DBL_MAX_EXP__ 1024
++// RISCV64: #define __DBL_MAX__ 1.7976931348623157e+308
++// RISCV64: #define __DBL_MIN_10_EXP__ (-307)
++// RISCV64: #define __DBL_MIN_EXP__ (-1021)
++// RISCV64: #define __DBL_MIN__ 2.2250738585072014e-308
++// RISCV64: #define __DECIMAL_DIG__ __LDBL_DECIMAL_DIG__
++// RISCV64: #define __ELF__ 1
++// RISCV64: #define __FINITE_MATH_ONLY__ 0
++// RISCV64: #define __FLT_DECIMAL_DIG__ 9
++// RISCV64: #define __FLT_DENORM_MIN__ 1.40129846e-45F
++// RISCV64: #define __FLT_DIG__ 6
++// RISCV64: #define __FLT_EPSILON__ 1.19209290e-7F
++// RISCV64: #define __FLT_EVAL_METHOD__ 0
++// RISCV64: #define __FLT_HAS_DENORM__ 1
++// RISCV64: #define __FLT_HAS_INFINITY__ 1
++// RISCV64: #define __FLT_HAS_QUIET_NAN__ 1
++// RISCV64: #define __FLT_MANT_DIG__ 24
++// RISCV64: #define __FLT_MAX_10_EXP__ 38
++// RISCV64: #define __FLT_MAX_EXP__ 128
++// RISCV64: #define __FLT_MAX__ 3.40282347e+38F
++// RISCV64: #define __FLT_MIN_10_EXP__ (-37)
++// RISCV64: #define __FLT_MIN_EXP__ (-125)
++// RISCV64: #define __FLT_MIN__ 1.17549435e-38F
++// RISCV64: #define __FLT_RADIX__ 2
++// RISCV64: #define __GCC_ATOMIC_BOOL_LOCK_FREE 1
++// RISCV64: #define __GCC_ATOMIC_CHAR16_T_LOCK_FREE 1
++// RISCV64: #define __GCC_ATOMIC_CHAR32_T_LOCK_FREE 1
++// RISCV64: #define __GCC_ATOMIC_CHAR_LOCK_FREE 1
++// RISCV64: #define __GCC_ATOMIC_INT_LOCK_FREE 1
++// RISCV64: #define __GCC_ATOMIC_LLONG_LOCK_FREE 1
++// RISCV64: #define __GCC_ATOMIC_LONG_LOCK_FREE 1
++// RISCV64: #define __GCC_ATOMIC_POINTER_LOCK_FREE 1
++// RISCV64: #define __GCC_ATOMIC_SHORT_LOCK_FREE 1
++// RISCV64: #define __GCC_ATOMIC_TEST_AND_SET_TRUEVAL 1
++// RISCV64: #define __GCC_ATOMIC_WCHAR_T_LOCK_FREE 1
++// RISCV64: #define __GNUC_MINOR__ {{.*}}
++// RISCV64: #define __GNUC_PATCHLEVEL__ {{.*}}
++// RISCV64: #define __GNUC_STDC_INLINE__ 1
++// RISCV64: #define __GNUC__ {{.*}}
++// RISCV64: #define __GXX_ABI_VERSION {{.*}}
++// RISCV64: #define __INT16_C_SUFFIX__
++// RISCV64: #define __INT16_MAX__ 32767
++// RISCV64: #define __INT16_TYPE__ short
++// RISCV64: #define __INT32_C_SUFFIX__
++// RISCV64: #define __INT32_MAX__ 2147483647
++// RISCV64: #define __INT32_TYPE__ int
++// RISCV64: #define __INT64_C_SUFFIX__ L
++// RISCV64: #define __INT64_MAX__ 9223372036854775807L
++// RISCV64: #define __INT64_TYPE__ long int
++// RISCV64: #define __INT8_C_SUFFIX__
++// RISCV64: #define __INT8_MAX__ 127
++// RISCV64: #define __INT8_TYPE__ signed char
++// RISCV64: #define __INTMAX_C_SUFFIX__ L
++// RISCV64: #define __INTMAX_MAX__ 9223372036854775807L
++// RISCV64: #define __INTMAX_TYPE__ long int
++// RISCV64: #define __INTMAX_WIDTH__ 64
++// RISCV64: #define __INTPTR_MAX__ 9223372036854775807L
++// RISCV64: #define __INTPTR_TYPE__ long int
++// RISCV64: #define __INTPTR_WIDTH__ 64
++// TODO: RISC-V GCC defines INT_FAST16 as int
++// RISCV64: #define __INT_FAST16_MAX__ 32767
++// RISCV64: #define __INT_FAST16_TYPE__ short
++// RISCV64: #define __INT_FAST32_MAX__ 2147483647
++// RISCV64: #define __INT_FAST32_TYPE__ int
++// RISCV64: #define __INT_FAST64_MAX__ 9223372036854775807L
++// RISCV64: #define __INT_FAST64_TYPE__ long int
++// TODO: RISC-V GCC defines INT_FAST8 as int
++// RISCV64: #define __INT_FAST8_MAX__ 127
++// RISCV64: #define __INT_FAST8_TYPE__ signed char
++// RISCV64: #define __INT_LEAST16_MAX__ 32767
++// RISCV64: #define __INT_LEAST16_TYPE__ short
++// RISCV64: #define __INT_LEAST32_MAX__ 2147483647
++// RISCV64: #define __INT_LEAST32_TYPE__ int
++// RISCV64: #define __INT_LEAST64_MAX__ 9223372036854775807L
++// RISCV64: #define __INT_LEAST64_TYPE__ long int
++// RISCV64: #define __INT_LEAST8_MAX__ 127
++// RISCV64: #define __INT_LEAST8_TYPE__ signed char
++// RISCV64: #define __INT_MAX__ 2147483647
++// RISCV64: #define __LDBL_DECIMAL_DIG__ 36
++// RISCV64: #define __LDBL_DENORM_MIN__ 6.47517511943802511092443895822764655e-4966L
++// RISCV64: #define __LDBL_DIG__ 33
++// RISCV64: #define __LDBL_EPSILON__ 1.92592994438723585305597794258492732e-34L
++// RISCV64: #define __LDBL_HAS_DENORM__ 1
++// RISCV64: #define __LDBL_HAS_INFINITY__ 1
++// RISCV64: #define __LDBL_HAS_QUIET_NAN__ 1
++// RISCV64: #define __LDBL_MANT_DIG__ 113
++// RISCV64: #define __LDBL_MAX_10_EXP__ 4932
++// RISCV64: #define __LDBL_MAX_EXP__ 16384
++// RISCV64: #define __LDBL_MAX__ 1.18973149535723176508575932662800702e+4932L
++// RISCV64: #define __LDBL_MIN_10_EXP__ (-4931)
++// RISCV64: #define __LDBL_MIN_EXP__ (-16381)
++// RISCV64: #define __LDBL_MIN__ 3.36210314311209350626267781732175260e-4932L
++// RISCV64: #define __LITTLE_ENDIAN__ 1
++// RISCV64: #define __LONG_LONG_MAX__ 9223372036854775807LL
++// RISCV64: #define __LONG_MAX__ 9223372036854775807L
++// RISCV64: #define __LP64__ 1
++// RISCV64: #define __NO_INLINE__ 1
++// RISCV64: #define __POINTER_WIDTH__ 64
++// RISCV64: #define __PRAGMA_REDEFINE_EXTNAME 1
++// RISCV64: #define __PTRDIFF_MAX__ 9223372036854775807L
++// RISCV64: #define __PTRDIFF_TYPE__ long int
++// RISCV64: #define __PTRDIFF_WIDTH__ 64
++// RISCV64: #define __SCHAR_MAX__ 127
++// RISCV64: #define __SHRT_MAX__ 32767
++// RISCV64: #define __SIG_ATOMIC_MAX__ 2147483647
++// RISCV64: #define __SIG_ATOMIC_WIDTH__ 32
++// RISCV64: #define __SIZEOF_DOUBLE__ 8
++// RISCV64: #define __SIZEOF_FLOAT__ 4
++// RISCV64: #define __SIZEOF_INT__ 4
++// RISCV64: #define __SIZEOF_LONG_DOUBLE__ 16
++// RISCV64: #define __SIZEOF_LONG_LONG__ 8
++// RISCV64: #define __SIZEOF_LONG__ 8
++// RISCV64: #define __SIZEOF_POINTER__ 8
++// RISCV64: #define __SIZEOF_PTRDIFF_T__ 8
++// RISCV64: #define __SIZEOF_SHORT__ 2
++// RISCV64: #define __SIZEOF_SIZE_T__ 8
++// RISCV64: #define __SIZEOF_WCHAR_T__ 4
++// RISCV64: #define __SIZEOF_WINT_T__ 4
++// RISCV64: #define __SIZE_MAX__ 18446744073709551615UL
++// RISCV64: #define __SIZE_TYPE__ long unsigned int
++// RISCV64: #define __SIZE_WIDTH__ 64
++// RISCV64: #define __STDC_HOSTED__ 0
++// RISCV64: #define __STDC_UTF_16__ 1
++// RISCV64: #define __STDC_UTF_32__ 1
++// RISCV64: #define __STDC_VERSION__ 201112L
++// RISCV64: #define __STDC__ 1
++// RISCV64: #define __UINT16_C_SUFFIX__
++// RISCV64: #define __UINT16_MAX__ 65535
++// RISCV64: #define __UINT16_TYPE__ unsigned short
++// RISCV64: #define __UINT32_C_SUFFIX__ U
++// RISCV64: #define __UINT32_MAX__ 4294967295U
++// RISCV64: #define __UINT32_TYPE__ unsigned int
++// RISCV64: #define __UINT64_C_SUFFIX__ UL
++// RISCV64: #define __UINT64_MAX__ 18446744073709551615UL
++// RISCV64: #define __UINT64_TYPE__ long unsigned int
++// RISCV64: #define __UINT8_C_SUFFIX__
++// RISCV64: #define __UINT8_MAX__ 255
++// RISCV64: #define __UINT8_TYPE__ unsigned char
++// RISCV64: #define __UINTMAX_C_SUFFIX__ UL
++// RISCV64: #define __UINTMAX_MAX__ 18446744073709551615UL
++// RISCV64: #define __UINTMAX_TYPE__ long unsigned int
++// RISCV64: #define __UINTMAX_WIDTH__ 64
++// RISCV64: #define __UINTPTR_MAX__ 18446744073709551615UL
++// RISCV64: #define __UINTPTR_TYPE__ long unsigned int
++// RISCV64: #define __UINTPTR_WIDTH__ 64
++// TODO: RISC-V GCC defines UINT_FAST16 to be unsigned int
++// RISCV64: #define __UINT_FAST16_MAX__ 65535
++// RISCV64: #define __UINT_FAST16_TYPE__ unsigned short
++// RISCV64: #define __UINT_FAST32_MAX__ 4294967295U
++// RISCV64: #define __UINT_FAST32_TYPE__ unsigned int
++// RISCV64: #define __UINT_FAST64_MAX__ 18446744073709551615UL
++// RISCV64: #define __UINT_FAST64_TYPE__ long unsigned int
++// TODO: RISC-V GCC defines UINT_FAST8 to be unsigned int
++// RISCV64: #define __UINT_FAST8_MAX__ 255
++// RISCV64: #define __UINT_FAST8_TYPE__ unsigned char
++// RISCV64: #define __UINT_LEAST16_MAX__ 65535
++// RISCV64: #define __UINT_LEAST16_TYPE__ unsigned short
++// RISCV64: #define __UINT_LEAST32_MAX__ 4294967295U
++// RISCV64: #define __UINT_LEAST32_TYPE__ unsigned int
++// RISCV64: #define __UINT_LEAST64_MAX__ 18446744073709551615UL
++// RISCV64: #define __UINT_LEAST64_TYPE__ long unsigned int
++// RISCV64: #define __UINT_LEAST8_MAX__ 255
++// RISCV64: #define __UINT_LEAST8_TYPE__ unsigned char
++// RISCV64: #define __USER_LABEL_PREFIX__
++// RISCV64: #define __WCHAR_MAX__ 2147483647
++// RISCV64: #define __WCHAR_TYPE__ int
++// RISCV64: #define __WCHAR_WIDTH__ 32
++// RISCV64: #define __WINT_TYPE__ unsigned int
++// RISCV64: #define __WINT_UNSIGNED__ 1
++// RISCV64: #define __WINT_WIDTH__ 32
++// RISCV64-LINUX: #define __gnu_linux__ 1
++// RISCV64-LINUX: #define __linux 1
++// RISCV64-LINUX: #define __linux__ 1
++// RISCV64: #define __riscv 1
++// RISCV64: #define __riscv_cmodel_medlow 1
++// RISCV64: #define __riscv_float_abi_soft 1
++// RISCV64: #define __riscv_xlen 64
++// RISCV64-LINUX: #define __unix 1
++// RISCV64-LINUX: #define __unix__ 1
++// RISCV64-LINUX: #define linux 1
++// RISCV64-LINUX: #define unix 1
+-- 
+2.16.2
+

@@ -1,0 +1,220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alex Bradbury <asb@lowrisc.org>
+Subject: [RISCV] Support stack frames and offsets up to 32-bits
+
+Also, factor out stack pointer manipulation to use the new 'adjustReg' helper
+function.
+---
+ lib/Target/RISCV/RISCVFrameLowering.cpp | 30 ++++++++++++++++++++------
+ lib/Target/RISCV/RISCVInstrInfo.cpp     | 20 +++++++++++++++++
+ lib/Target/RISCV/RISCVInstrInfo.h       |  5 +++++
+ lib/Target/RISCV/RISCVRegisterInfo.cpp  | 27 +++++++++++++++++++----
+ lib/Target/RISCV/RISCVRegisterInfo.h    |  8 +++++++
+ test/CodeGen/RISCV/large-stack.ll       | 38 +++++++++++++++++++++++++++++++++
+ 6 files changed, 117 insertions(+), 11 deletions(-)
+ create mode 100644 test/CodeGen/RISCV/large-stack.ll
+
+diff --git a/lib/Target/RISCV/RISCVFrameLowering.cpp b/lib/Target/RISCV/RISCVFrameLowering.cpp
+index e1448ba7e2b..85a354d0c12 100644
+--- a/lib/Target/RISCV/RISCVFrameLowering.cpp
++++ b/lib/Target/RISCV/RISCVFrameLowering.cpp
+@@ -62,18 +62,34 @@ void RISCVFrameLowering::adjustReg(MachineBasicBlock &MBB,
+                                    const DebugLoc &DL, unsigned DestReg,
+                                    unsigned SrcReg, int64_t Val,
+                                    MachineInstr::MIFlag Flag) const {
++  MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
+   const RISCVInstrInfo *TII = STI.getInstrInfo();
+ 
+   if (DestReg == SrcReg && Val == 0)
+     return;
+ 
+-  if (!isInt<12>(Val))
+-    report_fatal_error("adjustReg cannot yet handle adjustments >12 bits");
+-
+-  BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), DestReg)
+-      .addReg(SrcReg)
+-      .addImm(Val)
+-      .setMIFlag(Flag);
++  if (isInt<12>(Val)) {
++    BuildMI(MBB, MBBI, DL, TII->get(RISCV::ADDI), DestReg)
++        .addReg(SrcReg)
++        .addImm(Val)
++        .setMIFlag(Flag);
++  } else if (isInt<32>(Val)) {
++    unsigned Opc = RISCV::ADD;
++    bool isSub = Val < 0;
++    if (isSub) {
++      Val = -Val;
++      Opc = RISCV::SUB;
++    }
++
++    unsigned ScratchReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
++    TII->movImm32(MBB, MBBI, DL, ScratchReg, Val, Flag);
++    BuildMI(MBB, MBBI, DL, TII->get(Opc), DestReg)
++        .addReg(SrcReg)
++        .addReg(ScratchReg, RegState::Kill)
++        .setMIFlag(Flag);
++  } else {
++    report_fatal_error("adjustReg cannot yet handle adjustments >32 bits");
++  }
+ }
+ 
+ // Returns the register used to hold the frame pointer.
+diff --git a/lib/Target/RISCV/RISCVInstrInfo.cpp b/lib/Target/RISCV/RISCVInstrInfo.cpp
+index 186fe363edd..673b1f5c311 100644
+--- a/lib/Target/RISCV/RISCVInstrInfo.cpp
++++ b/lib/Target/RISCV/RISCVInstrInfo.cpp
+@@ -75,3 +75,23 @@ void RISCVInstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
+   else
+     llvm_unreachable("Can't load this register from stack slot");
+ }
++
++void RISCVInstrInfo::movImm32(MachineBasicBlock &MBB,
++                              MachineBasicBlock::iterator MBBI,
++                              const DebugLoc &DL, unsigned DstReg, uint64_t Val,
++                              MachineInstr::MIFlag Flag) const {
++  assert(isInt<32>(Val) && "Can only materialize 32-bit constants");
++
++  // TODO: If the value can be materialized using only one instruction, only
++  // insert a single instruction.
++
++  uint64_t Hi20 = ((Val + 0x800) >> 12) & 0xfffff;
++  uint64_t Lo12 = SignExtend64<12>(Val);
++  BuildMI(MBB, MBBI, DL, get(RISCV::LUI), DstReg)
++      .addImm(Hi20)
++      .setMIFlag(Flag);
++  BuildMI(MBB, MBBI, DL, get(RISCV::ADDI), DstReg)
++      .addReg(DstReg, RegState::Kill)
++      .addImm(Lo12)
++      .setMIFlag(Flag);
++}
+diff --git a/lib/Target/RISCV/RISCVInstrInfo.h b/lib/Target/RISCV/RISCVInstrInfo.h
+index 05c8378445c..cb2ed0beef1 100644
+--- a/lib/Target/RISCV/RISCVInstrInfo.h
++++ b/lib/Target/RISCV/RISCVInstrInfo.h
+@@ -41,6 +41,11 @@ public:
+                             MachineBasicBlock::iterator MBBI, unsigned DstReg,
+                             int FrameIndex, const TargetRegisterClass *RC,
+                             const TargetRegisterInfo *TRI) const override;
++
++  // Materializes the given int32 Val into DstReg.
++  void movImm32(MachineBasicBlock &MBB, MachineBasicBlock::iterator MBBI,
++                const DebugLoc &DL, unsigned DstReg, uint64_t Val,
++                MachineInstr::MIFlag Flag = MachineInstr::NoFlags) const;
+ };
+ }
+ #endif
+diff --git a/lib/Target/RISCV/RISCVRegisterInfo.cpp b/lib/Target/RISCV/RISCVRegisterInfo.cpp
+index 5776a92cab9..b634097bae3 100644
+--- a/lib/Target/RISCV/RISCVRegisterInfo.cpp
++++ b/lib/Target/RISCV/RISCVRegisterInfo.cpp
+@@ -61,6 +61,8 @@ void RISCVRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
+ 
+   MachineInstr &MI = *II;
+   MachineFunction &MF = *MI.getParent()->getParent();
++  MachineRegisterInfo &MRI = MF.getRegInfo();
++  const RISCVInstrInfo *TII = MF.getSubtarget<RISCVSubtarget>().getInstrInfo();
+   DebugLoc DL = MI.getDebugLoc();
+ 
+   int FrameIndex = MI.getOperand(FIOperandNum).getIndex();
+@@ -72,13 +74,30 @@ void RISCVRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
+   assert(MF.getSubtarget().getFrameLowering()->hasFP(MF) &&
+          "eliminateFrameIndex currently requires hasFP");
+ 
+-  // Offsets must be directly encoded in a 12-bit immediate field
+-  if (!isInt<12>(Offset)) {
++  if (!isInt<32>(Offset)) {
+     report_fatal_error(
+-        "Frame offsets outside of the signed 12-bit range not supported");
++        "Frame offsets outside of the signed 32-bit range not supported");
++  }
++
++  MachineBasicBlock &MBB = *MI.getParent();
++  bool FrameRegIsKill = false;
++
++  if (!isInt<12>(Offset)) {
++    assert(isInt<32>(Offset) && "Int32 expected");
++    // The offset won't fit in an immediate, so use a scratch register instead
++    // Modify Offset and FrameReg appropriately
++    unsigned ScratchReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
++    TII->movImm32(MBB, II, DL, ScratchReg, Offset);
++    BuildMI(MBB, II, DL, TII->get(RISCV::ADD), ScratchReg)
++        .addReg(FrameReg)
++        .addReg(ScratchReg, RegState::Kill);
++    Offset = 0;
++    FrameReg = ScratchReg;
++    FrameRegIsKill = true;
+   }
+ 
+-  MI.getOperand(FIOperandNum).ChangeToRegister(FrameReg, false);
++  MI.getOperand(FIOperandNum)
++      .ChangeToRegister(FrameReg, false, false, FrameRegIsKill);
+   MI.getOperand(FIOperandNum + 1).ChangeToImmediate(Offset);
+ }
+ 
+diff --git a/lib/Target/RISCV/RISCVRegisterInfo.h b/lib/Target/RISCV/RISCVRegisterInfo.h
+index 0b2bc3776fc..ed4dee3bed3 100644
+--- a/lib/Target/RISCV/RISCVRegisterInfo.h
++++ b/lib/Target/RISCV/RISCVRegisterInfo.h
+@@ -39,6 +39,14 @@ struct RISCVRegisterInfo : public RISCVGenRegisterInfo {
+                            RegScavenger *RS = nullptr) const override;
+ 
+   unsigned getFrameRegister(const MachineFunction &MF) const override;
++
++  bool requiresRegisterScavenging(const MachineFunction &MF) const override {
++    return true;
++  }
++
++  bool requiresFrameIndexScavenging(const MachineFunction &MF) const override {
++    return true;
++  }
+ };
+ }
+ 
+diff --git a/test/CodeGen/RISCV/large-stack.ll b/test/CodeGen/RISCV/large-stack.ll
+new file mode 100644
+index 00000000000..cecca220e19
+--- /dev/null
++++ b/test/CodeGen/RISCV/large-stack.ll
+@@ -0,0 +1,38 @@
++; NOTE: Assertions have been autogenerated by utils/update_llc_test_checks.py
++; RUN: llc -mtriple=riscv32 -verify-machineinstrs < %s \
++; RUN:   | FileCheck -check-prefix=RV32I %s
++
++; TODO: the quality of the generated code is poor
++
++define void @test() nounwind {
++; RV32I-LABEL: test:
++; RV32I:       # %bb.0:
++; RV32I-NEXT:    lui a0, 74565
++; RV32I-NEXT:    addi a0, a0, 1664
++; RV32I-NEXT:    sub sp, sp, a0
++; RV32I-NEXT:    lui a0, 74565
++; RV32I-NEXT:    addi a0, a0, 1660
++; RV32I-NEXT:    add a0, sp, a0
++; RV32I-NEXT:    sw ra, 0(a0)
++; RV32I-NEXT:    lui a0, 74565
++; RV32I-NEXT:    addi a0, a0, 1656
++; RV32I-NEXT:    add a0, sp, a0
++; RV32I-NEXT:    sw s0, 0(a0)
++; RV32I-NEXT:    lui a0, 74565
++; RV32I-NEXT:    addi a0, a0, 1664
++; RV32I-NEXT:    add s0, sp, a0
++; RV32I-NEXT:    lui a0, 74565
++; RV32I-NEXT:    addi a0, a0, 1656
++; RV32I-NEXT:    add a0, sp, a0
++; RV32I-NEXT:    lw s0, 0(a0)
++; RV32I-NEXT:    lui a0, 74565
++; RV32I-NEXT:    addi a0, a0, 1660
++; RV32I-NEXT:    add a0, sp, a0
++; RV32I-NEXT:    lw ra, 0(a0)
++; RV32I-NEXT:    lui a0, 74565
++; RV32I-NEXT:    addi a0, a0, 1664
++; RV32I-NEXT:    add sp, sp, a0
++; RV32I-NEXT:    jalr zero, ra, 0
++  %tmp = alloca [ 305419896 x i8 ] , align 4
++  ret void
++}
+-- 
+2.16.2
+

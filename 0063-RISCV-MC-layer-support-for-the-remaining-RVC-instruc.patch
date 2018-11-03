@@ -1,0 +1,1191 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alex Bradbury <asb@lowrisc.org>
+Subject: [RISCV] MC layer support for the remaining RVC instructions
+
+Differential Revision: https://reviews.llvm.org/D40003
+Differential Revision: https://reviews.llvm.org/D41216
+Differential Revision: https://reviews.llvm.org/D42834
+Differential Revision: https://reviews.llvm.org/D42782
+
+Patch by Shiva Chen.
+
+This patch has been modified since being committed upstream.
+
+This patch also incorporates changes from:
+Differential Revision: https://reviews.llvm.org/D42132
+Patch by Ana Pazos.
+---
+ lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp      | 103 +++++++-
+ .../RISCV/Disassembler/RISCVDisassembler.cpp       |  90 ++++++-
+ lib/Target/RISCV/RISCV.td                          |   3 +-
+ lib/Target/RISCV/RISCVInstrFormatsC.td             |  11 +
+ lib/Target/RISCV/RISCVInstrInfoC.td                | 263 ++++++++++++++++++++-
+ lib/Target/RISCV/RISCVRegisterInfo.td              |  23 ++
+ test/MC/RISCV/rv32c-invalid.s                      |  52 ++++
+ test/MC/RISCV/rv32c-only-valid.s                   |  15 ++
+ test/MC/RISCV/rv32c-valid.s                        |  67 +++++-
+ test/MC/RISCV/rv32dc-invalid.s                     |  12 +
+ test/MC/RISCV/rv32dc-valid.s                       |  29 +++
+ test/MC/RISCV/rv32fc-invalid.s                     |  12 +
+ test/MC/RISCV/rv32fc-valid.s                       |  32 +++
+ test/MC/RISCV/rv64c-invalid.s                      |  11 +
+ test/MC/RISCV/rv64c-valid.s                        |  28 +++
+ test/MC/RISCV/rv64dc-valid.s                       |  29 +++
+ 16 files changed, 756 insertions(+), 24 deletions(-)
+ create mode 100644 test/MC/RISCV/rv32c-only-valid.s
+ create mode 100644 test/MC/RISCV/rv32dc-invalid.s
+ create mode 100644 test/MC/RISCV/rv32dc-valid.s
+ create mode 100644 test/MC/RISCV/rv32fc-invalid.s
+ create mode 100644 test/MC/RISCV/rv32fc-valid.s
+ create mode 100644 test/MC/RISCV/rv64dc-valid.s
+
+diff --git a/lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp b/lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp
+index cde00f5d515..ae2a83f577b 100644
+--- a/lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp
++++ b/lib/Target/RISCV/AsmParser/RISCVAsmParser.cpp
+@@ -216,6 +216,18 @@ public:
+     return (isRV64() && isUInt<6>(Imm)) || isUInt<5>(Imm);
+   }
+ 
++  bool isUImmLog2XLenNonZero() const {
++    int64_t Imm;
++    RISCVMCExpr::VariantKind VK;
++    if (!isImm())
++      return false;
++    if (!evaluateConstantImm(Imm, VK) || VK != RISCVMCExpr::VK_RISCV_None)
++      return false;
++    if (Imm == 0)
++      return false;
++    return (isRV64() && isUInt<6>(Imm)) || isUInt<5>(Imm);
++  }
++
+   bool isUImm5() const {
+     int64_t Imm;
+     RISCVMCExpr::VariantKind VK;
+@@ -225,6 +237,51 @@ public:
+     return IsConstantImm && isUInt<5>(Imm) && VK == RISCVMCExpr::VK_RISCV_None;
+   }
+ 
++  bool isUImm5NonZero() const {
++    int64_t Imm;
++    RISCVMCExpr::VariantKind VK;
++    if (!isImm())
++      return false;
++    bool IsConstantImm = evaluateConstantImm(Imm, VK);
++    return IsConstantImm && isUInt<5>(Imm) && (Imm != 0) &&
++           VK == RISCVMCExpr::VK_RISCV_None;
++  }
++
++  bool isSImm6() const {
++    RISCVMCExpr::VariantKind VK;
++    int64_t Imm;
++    bool IsValid;
++    bool IsConstantImm = evaluateConstantImm(Imm, VK);
++    if (!IsConstantImm)
++      IsValid = RISCVAsmParser::classifySymbolRef(getImm(), VK, Imm);
++    else
++      IsValid = isInt<6>(Imm);
++    return IsValid &&
++           (VK == RISCVMCExpr::VK_RISCV_None || VK == RISCVMCExpr::VK_RISCV_LO);
++  }
++
++  bool isSImm6NonZero() const {
++    RISCVMCExpr::VariantKind VK;
++    int64_t Imm;
++    bool IsValid;
++    bool IsConstantImm = evaluateConstantImm(Imm, VK);
++    if (!IsConstantImm)
++      IsValid = RISCVAsmParser::classifySymbolRef(getImm(), VK, Imm);
++    else
++      IsValid = ((Imm != 0) && isInt<6>(Imm));
++    return IsValid &&
++           (VK == RISCVMCExpr::VK_RISCV_None || VK == RISCVMCExpr::VK_RISCV_LO);
++  }
++
++  bool isCLUIImm() const {
++    int64_t Imm;
++    RISCVMCExpr::VariantKind VK;
++    bool IsConstantImm = evaluateConstantImm(Imm, VK);
++    return IsConstantImm && (Imm != 0) &&
++           (isUInt<5>(Imm) || (Imm >= 0xfffe0 && Imm <= 0xfffff)) &&
++           VK == RISCVMCExpr::VK_RISCV_None;
++  }
++
+   bool isUImm7Lsb00() const {
+     int64_t Imm;
+     RISCVMCExpr::VariantKind VK;
+@@ -259,6 +316,14 @@ public:
+            VK == RISCVMCExpr::VK_RISCV_None;
+   }
+ 
++  bool isUImm10Lsb00NonZero() const {
++    int64_t Imm;
++    RISCVMCExpr::VariantKind VK;
++    bool IsConstantImm = evaluateConstantImm(Imm, VK);
++    return IsConstantImm && isShiftedUInt<8, 2>(Imm) && (Imm != 0) &&
++           VK == RISCVMCExpr::VK_RISCV_None;
++  }
++
+   bool isSImm12() const {
+     RISCVMCExpr::VariantKind VK;
+     int64_t Imm;
+@@ -287,6 +352,14 @@ public:
+ 
+   bool isSImm13Lsb0() const { return isBareSimmNLsb0<13>(); }
+ 
++  bool isSImm10Lsb0000NonZero() const {
++    int64_t Imm;
++    RISCVMCExpr::VariantKind VK;
++    bool IsConstantImm = evaluateConstantImm(Imm, VK);
++    return IsConstantImm && (Imm != 0) && isShiftedInt<6, 4>(Imm) &&
++           VK == RISCVMCExpr::VK_RISCV_None;
++  }
++
+   bool isUImm20() const {
+     RISCVMCExpr::VariantKind VK;
+     int64_t Imm;
+@@ -491,10 +564,13 @@ unsigned RISCVAsmParser::validateTargetOperandClass(MCParsedAsmOperand &AsmOp,
+   unsigned Reg = Op.getReg();
+   bool IsRegFPR32 =
+       RISCVMCRegisterClasses[RISCV::FPR32RegClassID].contains(Reg);
++  bool IsRegFPR32C =
++      RISCVMCRegisterClasses[RISCV::FPR32CRegClassID].contains(Reg);
+ 
+   // As the parser couldn't differentiate an FPR32 from an FPR64, coerce the
+-  // register from FPR32 to FPR64 if necessary.
+-  if (IsRegFPR32 && Kind == MCK_FPR64) {
++  // register from FPR32 to FPR64 or FPR32C to FPR64C if necessary.
++  if ((IsRegFPR32 && Kind == MCK_FPR64) ||
++      (IsRegFPR32C && Kind == MCK_FPR64C)) {
+     Op.Reg.RegNum = convertFPR32ToFPR64(Reg);
+     return Match_Success;
+   }
+@@ -542,8 +618,23 @@ bool RISCVAsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
+     if (isRV64())
+       return generateImmOutOfRangeError(Operands, ErrorInfo, 0, (1 << 6) - 1);
+     return generateImmOutOfRangeError(Operands, ErrorInfo, 0, (1 << 5) - 1);
++  case Match_InvalidUImmLog2XLenNonZero:
++    if (isRV64())
++      return generateImmOutOfRangeError(Operands, ErrorInfo, 1, (1 << 6) - 1);
++    return generateImmOutOfRangeError(Operands, ErrorInfo, 1, (1 << 5) - 1);
+   case Match_InvalidUImm5:
+     return generateImmOutOfRangeError(Operands, ErrorInfo, 0, (1 << 5) - 1);
++  case Match_InvalidSImm6:
++    return generateImmOutOfRangeError(Operands, ErrorInfo, -(1 << 5),
++                                      (1 << 5) - 1);
++  case Match_InvalidSImm6NonZero:
++    return generateImmOutOfRangeError(
++        Operands, ErrorInfo, -(1 << 5), (1 << 5) - 1,
++        "immediate must be non-zero in the range");
++  case Match_InvalidCLUIImm:
++    return generateImmOutOfRangeError(
++        Operands, ErrorInfo, 1, (1 << 5) - 1,
++        "immediate must be in [0xfffe0, 0xfffff] or");
+   case Match_InvalidUImm7Lsb00:
+     return generateImmOutOfRangeError(
+         Operands, ErrorInfo, 0, (1 << 7) - 4,
+@@ -564,6 +655,14 @@ bool RISCVAsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
+     return generateImmOutOfRangeError(
+         Operands, ErrorInfo, 0, (1 << 9) - 8,
+         "immediate must be a multiple of 8 bytes in the range");
++  case Match_InvalidUImm10Lsb00NonZero:
++    return generateImmOutOfRangeError(
++        Operands, ErrorInfo, 4, (1 << 10) - 4,
++        "immediate must be a multiple of 4 bytes in the range");
++  case Match_InvalidSImm10Lsb0000NonZero:
++    return generateImmOutOfRangeError(
++        Operands, ErrorInfo, -(1 << 9), (1 << 9) - 16,
++        "immediate must be a multiple of 16 bytes and non-zero in the range");
+   case Match_InvalidSImm12:
+     return generateImmOutOfRangeError(Operands, ErrorInfo, -(1 << 11),
+                                       (1 << 11) - 1);
+diff --git a/lib/Target/RISCV/Disassembler/RISCVDisassembler.cpp b/lib/Target/RISCV/Disassembler/RISCVDisassembler.cpp
+index eeada77dae3..b4070b5a4e7 100644
+--- a/lib/Target/RISCV/Disassembler/RISCVDisassembler.cpp
++++ b/lib/Target/RISCV/Disassembler/RISCVDisassembler.cpp
+@@ -69,15 +69,15 @@ static const unsigned GPRDecoderTable[] = {
+ static DecodeStatus DecodeGPRRegisterClass(MCInst &Inst, uint64_t RegNo,
+                                            uint64_t Address,
+                                            const void *Decoder) {
+-   if (RegNo > sizeof(GPRDecoderTable))
+-     return MCDisassembler::Fail;
++  if (RegNo > sizeof(GPRDecoderTable))
++    return MCDisassembler::Fail;
+ 
+-   // We must define our own mapping from RegNo to register identifier.
+-   // Accessing index RegNo in the register class will work in the case that
+-   // registers were added in ascending order, but not in general.
+-   unsigned Reg = GPRDecoderTable[RegNo];
+-   Inst.addOperand(MCOperand::createReg(Reg));
+-   return MCDisassembler::Success;
++  // We must define our own mapping from RegNo to register identifier.
++  // Accessing index RegNo in the register class will work in the case that
++  // registers were added in ascending order, but not in general.
++  unsigned Reg = GPRDecoderTable[RegNo];
++  Inst.addOperand(MCOperand::createReg(Reg));
++  return MCDisassembler::Success;
+ }
+ 
+ static const unsigned FPR32DecoderTable[] = {
+@@ -105,6 +105,17 @@ static DecodeStatus DecodeFPR32RegisterClass(MCInst &Inst, uint64_t RegNo,
+   return MCDisassembler::Success;
+ }
+ 
++static DecodeStatus DecodeFPR32CRegisterClass(MCInst &Inst, uint64_t RegNo,
++                                              uint64_t Address,
++                                              const void *Decoder) {
++  if (RegNo > 8) {
++    return MCDisassembler::Fail;
++  }
++  unsigned Reg = FPR32DecoderTable[RegNo + 8];
++  Inst.addOperand(MCOperand::createReg(Reg));
++  return MCDisassembler::Success;
++}
++
+ static const unsigned FPR64DecoderTable[] = {
+   RISCV::F0_64,  RISCV::F1_64,  RISCV::F2_64,  RISCV::F3_64,
+   RISCV::F4_64,  RISCV::F5_64,  RISCV::F6_64,  RISCV::F7_64,
+@@ -130,14 +141,35 @@ static DecodeStatus DecodeFPR64RegisterClass(MCInst &Inst, uint64_t RegNo,
+   return MCDisassembler::Success;
+ }
+ 
++static DecodeStatus DecodeFPR64CRegisterClass(MCInst &Inst, uint64_t RegNo,
++                                              uint64_t Address,
++                                              const void *Decoder) {
++  if (RegNo > 8) {
++    return MCDisassembler::Fail;
++  }
++  unsigned Reg = FPR64DecoderTable[RegNo + 8];
++  Inst.addOperand(MCOperand::createReg(Reg));
++  return MCDisassembler::Success;
++}
++
+ static DecodeStatus DecodeGPRNoX0RegisterClass(MCInst &Inst, uint64_t RegNo,
+                                                uint64_t Address,
+                                                const void *Decoder) {
+-   if (RegNo == 0) {
+-     return MCDisassembler::Fail;
+-   }
++  if (RegNo == 0) {
++    return MCDisassembler::Fail;
++  }
+ 
+-   return DecodeGPRRegisterClass(Inst, RegNo, Address, Decoder);
++  return DecodeGPRRegisterClass(Inst, RegNo, Address, Decoder);
++}
++
++static DecodeStatus DecodeGPRNoX0X2RegisterClass(MCInst &Inst, uint64_t RegNo,
++                                                 uint64_t Address,
++                                                 const void *Decoder) {
++  if (RegNo == 2) {
++    return MCDisassembler::Fail;
++  }
++
++  return DecodeGPRNoX0RegisterClass(Inst, RegNo, Address, Decoder);
+ }
+ 
+ static DecodeStatus DecodeGPRCRegisterClass(MCInst &Inst, uint64_t RegNo,
+@@ -155,7 +187,16 @@ static DecodeStatus DecodeGPRCRegisterClass(MCInst &Inst, uint64_t RegNo,
+ // operand isn't explicitly encoded in the instruction.
+ static void addImplySP(MCInst &Inst, int64_t Address, const void *Decoder) {
+   if (Inst.getOpcode() == RISCV::C_LWSP || Inst.getOpcode() == RISCV::C_SWSP ||
+-      Inst.getOpcode() == RISCV::C_LDSP || Inst.getOpcode() == RISCV::C_SDSP) {
++      Inst.getOpcode() == RISCV::C_LDSP || Inst.getOpcode() == RISCV::C_SDSP ||
++      Inst.getOpcode() == RISCV::C_FLWSP ||
++      Inst.getOpcode() == RISCV::C_FSWSP ||
++      Inst.getOpcode() == RISCV::C_FLDSP ||
++      Inst.getOpcode() == RISCV::C_FSDSP ||
++      Inst.getOpcode() == RISCV::C_ADDI4SPN) {
++    DecodeGPRRegisterClass(Inst, 2, Address, Decoder);
++  }
++  if (Inst.getOpcode() == RISCV::C_ADDI16SP) {
++    DecodeGPRRegisterClass(Inst, 2, Address, Decoder);
+     DecodeGPRRegisterClass(Inst, 2, Address, Decoder);
+   }
+ }
+@@ -173,6 +214,7 @@ template <unsigned N>
+ static DecodeStatus decodeSImmOperand(MCInst &Inst, uint64_t Imm,
+                                       int64_t Address, const void *Decoder) {
+   assert(isUInt<N>(Imm) && "Invalid immediate");
++  addImplySP(Inst, Address, Decoder);
+   // Sign-extend the number in the bottom N bits of Imm
+   Inst.addOperand(MCOperand::createImm(SignExtend64<N>(Imm)));
+   return MCDisassembler::Success;
+@@ -190,6 +232,16 @@ static DecodeStatus decodeSImmOperandAndLsl1(MCInst &Inst, uint64_t Imm,
+   return MCDisassembler::Success;
+ }
+ 
++static DecodeStatus decodeCLUIImmOperand(MCInst &Inst, uint64_t Imm,
++                                         int64_t Address, const void *Decoder) {
++  assert(isUInt<6>(Imm) && "Invalid immediate");
++  if (Imm > 31) {
++    Imm = (SignExtend64<6>(Imm) & 0xfffff);
++  }
++  Inst.addOperand(MCOperand::createImm(Imm));
++  return MCDisassembler::Success;
++}
++
+ #include "RISCVGenDisassemblerTables.inc"
+ 
+ DecodeStatus RISCVDisassembler::getInstruction(MCInst &MI, uint64_t &Size,
+@@ -210,6 +262,18 @@ DecodeStatus RISCVDisassembler::getInstruction(MCInst &MI, uint64_t &Size,
+     Size = 4;
+   } else {
+     Insn = support::endian::read16le(Bytes.data());
++
++    if (!STI.getFeatureBits()[RISCV::Feature64Bit]) {
++      DEBUG(dbgs() << "Trying RISCV32Only_16 table (16-bit Instruction):\n");
++      // Calling the auto-generated decoder function.
++      Result = decodeInstruction(DecoderTableRISCV32Only_16, MI, Insn, Address,
++                                 this, STI);
++      if (Result != MCDisassembler::Fail) {
++        Size = 2;
++        return Result;
++      }
++    }
++
+     DEBUG(dbgs() << "Trying RISCV_C table (16-bit Instruction):\n");
+     // Calling the auto-generated decoder function.
+     Result = decodeInstruction(DecoderTable16, MI, Insn, Address, this, STI);
+diff --git a/lib/Target/RISCV/RISCV.td b/lib/Target/RISCV/RISCV.td
+index 5a6f3580b09..7247854d713 100644
+--- a/lib/Target/RISCV/RISCV.td
++++ b/lib/Target/RISCV/RISCV.td
+@@ -49,7 +49,8 @@ def Feature64Bit
+     : SubtargetFeature<"64bit", "HasRV64", "true", "Implements RV64">;
+ def IsRV64 : Predicate<"Subtarget->is64Bit()">,
+                        AssemblerPredicate<"Feature64Bit">;
+-def IsRV32 : Predicate<"!Subtarget->is64Bit()">;
++def IsRV32 : Predicate<"!Subtarget->is64Bit()">,
++                       AssemblerPredicate<"!Feature64Bit">;
+ 
+ def RV64 : HwMode<"+64bit">;
+ def RV32 : HwMode<"-64bit">;
+diff --git a/lib/Target/RISCV/RISCVInstrFormatsC.td b/lib/Target/RISCV/RISCVInstrFormatsC.td
+index fe4778bd313..6abcbd7cc8a 100644
+--- a/lib/Target/RISCV/RISCVInstrFormatsC.td
++++ b/lib/Target/RISCV/RISCVInstrFormatsC.td
+@@ -77,6 +77,17 @@ class RVInst16CSS<bits<3> funct3, bits<2> opcode, dag outs, dag ins,
+   let Inst{1-0} = opcode;
+ }
+ 
++class RVInst16CIW<bits<3> funct3, bits<2> opcode, dag outs, dag ins,
++                  string opcodestr, string argstr>
++    : RVInst16<outs, ins, opcodestr, argstr, [], InstFormatCIW> {
++  bits<10> imm;
++  bits<3> rd;
++
++  let Inst{15-13} = funct3;
++  let Inst{4-2} = rd;
++  let Inst{1-0} = opcode;
++}
++
+ // The immediate value encoding differs for each instruction, so each subclass
+ // is responsible for setting the appropriate bits in the Inst field.
+ // The bits Inst{12-10} and Inst{6-5} must be set for each instruction.
+diff --git a/lib/Target/RISCV/RISCVInstrInfoC.td b/lib/Target/RISCV/RISCVInstrInfoC.td
+index ed42a291713..a1b593763c4 100644
+--- a/lib/Target/RISCV/RISCVInstrInfoC.td
++++ b/lib/Target/RISCV/RISCVInstrInfoC.td
+@@ -13,6 +13,55 @@ include "RISCVInstrFormatsC.td"
+ // Operand definitions.
+ //===----------------------------------------------------------------------===//
+ 
++def UImmLog2XLenNonZeroAsmOperand : AsmOperandClass {
++  let Name = "UImmLog2XLenNonZero";
++  let RenderMethod = "addImmOperands";
++  let DiagnosticType = "InvalidUImmLog2XLenNonZero";
++}
++
++def uimmlog2xlennonzero : Operand<XLenVT>, ImmLeaf<XLenVT, [{
++  if (Subtarget->is64Bit())
++    return isUInt<6>(Imm) && (Imm != 0);
++  return isUInt<5>(Imm) && (Imm != 0);
++}]> {
++  let ParserMatchClass = UImmLog2XLenNonZeroAsmOperand;
++  // TODO: should ensure invalid shamt is rejected when decoding.
++  let DecoderMethod = "decodeUImmOperand<6>";
++}
++
++def simm6 : Operand<XLenVT>, ImmLeaf<XLenVT, [{return isInt<6>(Imm);}]> {
++  let ParserMatchClass = SImmAsmOperand<6>;
++  let EncoderMethod = "getImmOpValue";
++  let DecoderMethod = "decodeSImmOperand<6>";
++}
++
++def simm6nonzero : Operand<XLenVT>,
++                   ImmLeaf<XLenVT, [{return (Imm != 0) && isInt<6>(Imm);}]> {
++  let ParserMatchClass = SImmAsmOperand<6, "NonZero">;
++  let EncoderMethod = "getImmOpValue";
++  let DecoderMethod = "decodeSImmOperand<6>";
++}
++
++def CLUIImmAsmOperand : AsmOperandClass {
++  let Name = "CLUIImm";
++  let RenderMethod = "addImmOperands";
++  let DiagnosticType = !strconcat("Invalid", Name);
++}
++
++// c_lui_imm checks the immediate range is in [1, 31] or [0xfffe0, 0xfffff].
++// The RISC-V ISA describes the constraint as [1, 63], with that value being
++// loaded in to bits 17-12 of the destination register and sign extended from
++// bit 17. Therefore, this 6-bit immediate can represent values in the ranges
++// [1, 31] and [0xfffe0, 0xfffff].
++def c_lui_imm : Operand<XLenVT>,
++                ImmLeaf<XLenVT, [{return (Imm != 0) &&
++                                 (isUInt<5>(Imm) ||
++                                  (Imm >= 0xfffe0 && Imm <= 0xfffff));}]> {
++  let ParserMatchClass = CLUIImmAsmOperand;
++  let EncoderMethod = "getImmOpValue";
++  let DecoderMethod = "decodeCLUIImmOperand";
++ }
++
+ // A 7-bit unsigned immediate where the least significant two bits are zero.
+ def uimm7_lsb00 : Operand<XLenVT>,
+                   ImmLeaf<XLenVT, [{return isShiftedUInt<5, 2>(Imm);}]> {
+@@ -52,6 +101,25 @@ def uimm9_lsb000 : Operand<XLenVT>,
+   let DecoderMethod = "decodeUImmOperand<9>";
+ }
+ 
++// A 10-bit unsigned immediate where the least significant two bits are zero
++// and the immediate can't be zero.
++def uimm10_lsb00nonzero : Operand<XLenVT>,
++                          ImmLeaf<XLenVT,
++                          [{return isShiftedUInt<8, 2>(Imm) && (Imm != 0);}]> {
++  let ParserMatchClass = UImmAsmOperand<10, "Lsb00NonZero">;
++  let EncoderMethod = "getImmOpValue";
++  let DecoderMethod = "decodeUImmOperand<10>";
++}
++
++// A 10-bit signed immediate where the least significant four bits are zero.
++def simm10_lsb0000nonzero : Operand<XLenVT>,
++                            ImmLeaf<XLenVT,
++                            [{return (Imm != 0) && isShiftedInt<6, 4>(Imm);}]> {
++  let ParserMatchClass = SImmAsmOperand<10, "Lsb0000NonZero">;
++  let EncoderMethod = "getImmOpValue";
++  let DecoderMethod = "decodeSImmOperand<10>";
++}
++
+ // A 12-bit signed immediate where the least significant bit is zero.
+ def simm12_lsb0 : Operand<OtherVT> {
+   let ParserMatchClass = SImmAsmOperand<12, "Lsb0">;
+@@ -78,19 +146,19 @@ class CStackStore<bits<3> funct3, string OpcodeStr,
+ let hasSideEffects = 0, mayLoad = 1, mayStore = 0 in
+ class CLoad_ri<bits<3> funct3, string OpcodeStr,
+                RegisterClass cls, DAGOperand opnd>
+-    : RVInst16CL<funct3, 0b00, (outs cls:$rd), (ins cls:$rs1, opnd:$imm),
++    : RVInst16CL<funct3, 0b00, (outs cls:$rd), (ins GPRC:$rs1, opnd:$imm),
+                  OpcodeStr, "$rd, ${imm}(${rs1})">;
+ 
+ let hasSideEffects = 0, mayLoad = 0, mayStore = 1 in
+ class CStore_rri<bits<3> funct3, string OpcodeStr,
+                  RegisterClass cls, DAGOperand opnd>
+-    : RVInst16CS<funct3, 0b00, (outs), (ins cls:$rs2, cls:$rs1, opnd:$imm),
++    : RVInst16CS<funct3, 0b00, (outs), (ins cls:$rs2, GPRC:$rs1, opnd:$imm),
+                  OpcodeStr, "$rs2, ${imm}(${rs1})">;
+ 
+ let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
+ class Bcz<bits<3> funct3, string OpcodeStr, PatFrag CondOp,
+-          RegisterClass cls> :
+-      RVInst16CB<funct3, 0b01, (outs), (ins cls:$rs1, simm9_lsb0:$imm),
++          RegisterClass cls>
++    : RVInst16CB<funct3, 0b01, (outs), (ins cls:$rs1, simm9_lsb0:$imm),
+                  OpcodeStr, "$rs1, $imm"> {
+   let isBranch = 1;
+   let isTerminator = 1;
+@@ -101,12 +169,54 @@ class Bcz<bits<3> funct3, string OpcodeStr, PatFrag CondOp,
+   let Inst{2} = imm{4};
+ }
+ 
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++class Shift_right<bits<2> funct2, string OpcodeStr, RegisterClass cls,
++                  Operand ImmOpnd>
++    : RVInst16CB<0b100, 0b01, (outs cls:$rs1_wb), (ins cls:$rs1, ImmOpnd:$imm),
++                 OpcodeStr, "$rs1, $imm"> {
++  let Constraints = "$rs1 = $rs1_wb";
++  let Inst{12} = imm{5};
++  let Inst{11-10} = funct2;
++  let Inst{6-2} = imm{4-0};
++}
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++class CS_ALU<bits<2> funct2, string OpcodeStr, RegisterClass cls,
++             bit RV64only>
++    : RVInst16CS<0b100, 0b01, (outs cls:$rd_wb), (ins cls:$rd, cls:$rs2),
++                 OpcodeStr, "$rd, $rs2"> {
++  bits<3> rd;
++  let Constraints = "$rd = $rd_wb";
++  let Inst{12} = RV64only;
++  let Inst{11-10} = 0b11;
++  let Inst{9-7} = rd;
++  let Inst{6-5} = funct2;
++}
++
+ //===----------------------------------------------------------------------===//
+ // Instructions
+ //===----------------------------------------------------------------------===//
+ 
+ let Predicates = [HasStdExtC] in {
+ 
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0, Uses = [X2] in
++def C_ADDI4SPN : RVInst16CIW<0b000, 0b00, (outs GPRC:$rd),
++                             (ins SP:$rs1, uimm10_lsb00nonzero:$imm),
++                             "c.addi4spn", "$rd, $rs1, $imm"> {
++  bits<5> rs1;
++  let Inst{12-11} = imm{5-4};
++  let Inst{10-7} = imm{9-6};
++  let Inst{6} = imm{2};
++  let Inst{5} = imm{3};
++}
++
++let Predicates = [HasStdExtC, HasStdExtD] in
++def C_FLD : CLoad_ri<0b001, "c.fld", FPR64C, uimm8_lsb000> {
++  bits<8> imm;
++  let Inst{12-10} = imm{5-3};
++  let Inst{6-5} = imm{7-6};
++}
++
+ def C_LW : CLoad_ri<0b010, "c.lw", GPRC, uimm7_lsb00> {
+   bits<7> imm;
+   let Inst{12-10} = imm{5-3};
+@@ -114,6 +224,15 @@ def C_LW : CLoad_ri<0b010, "c.lw", GPRC, uimm7_lsb00> {
+   let Inst{5} = imm{6};
+ }
+ 
++let DecoderNamespace = "RISCV32Only_",
++    Predicates = [HasStdExtC, HasStdExtF, IsRV32] in
++def C_FLW : CLoad_ri<0b011, "c.flw", FPR32C, uimm7_lsb00> {
++  bits<7> imm;
++  let Inst{12-10} = imm{5-3};
++  let Inst{6} = imm{2};
++  let Inst{5} = imm{6};
++}
++
+ let Predicates = [HasStdExtC, IsRV64] in
+ def C_LD : CLoad_ri<0b011, "c.ld", GPRC, uimm8_lsb000> {
+   bits<8> imm;
+@@ -121,6 +240,13 @@ def C_LD : CLoad_ri<0b011, "c.ld", GPRC, uimm8_lsb000> {
+   let Inst{6-5} = imm{7-6};
+ }
+ 
++let Predicates = [HasStdExtC, HasStdExtD] in
++def C_FSD : CStore_rri<0b101, "c.fsd", FPR64C, uimm8_lsb000> {
++  bits<8> imm;
++  let Inst{12-10} = imm{5-3};
++  let Inst{6-5} = imm{7-6};
++}
++
+ def C_SW : CStore_rri<0b110, "c.sw", GPRC, uimm7_lsb00> {
+   bits<7> imm;
+   let Inst{12-10} = imm{5-3};
+@@ -128,6 +254,15 @@ def C_SW : CStore_rri<0b110, "c.sw", GPRC, uimm7_lsb00> {
+   let Inst{5} = imm{6};
+ }
+ 
++let DecoderNamespace = "RISCV32Only_",
++    Predicates = [HasStdExtC, HasStdExtF, IsRV32]  in
++def C_FSW : CStore_rri<0b111, "c.fsw", FPR32C, uimm7_lsb00> {
++  bits<7> imm;
++  let Inst{12-10} = imm{5-3};
++  let Inst{6} = imm{2};
++  let Inst{5} = imm{6};
++}
++
+ let Predicates = [HasStdExtC, IsRV64] in
+ def C_SD : CStore_rri<0b111, "c.sd", GPRC, uimm8_lsb000> {
+   bits<8> imm;
+@@ -135,10 +270,80 @@ def C_SD : CStore_rri<0b111, "c.sd", GPRC, uimm8_lsb000> {
+   let Inst{6-5} = imm{7-6};
+ }
+ 
+-let hasSideEffects = 0, mayLoad = 0, mayStore = 0, isCall = 1 in
++let rd = 0, imm = 0, hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_NOP : RVInst16CI<0b000, 0b01, (outs), (ins), "c.nop", "">;
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_ADDI : RVInst16CI<0b000, 0b01, (outs GPRNoX0:$rd_wb),
++                        (ins GPRNoX0:$rd, simm6nonzero:$imm),
++                        "c.addi", "$rd, $imm"> {
++  let Constraints = "$rd = $rd_wb";
++  let Inst{6-2} = imm{4-0};
++}
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0, isCall = 1,
++    DecoderNamespace = "RISCV32Only_", Defs = [X1],
++    Predicates = [HasStdExtC, IsRV32]  in
+ def C_JAL : RVInst16CJ<0b001, 0b01, (outs), (ins simm12_lsb0:$offset),
+                        "c.jal", "$offset">;
+ 
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0,
++    Predicates = [HasStdExtC, IsRV64] in
++def C_ADDIW : RVInst16CI<0b001, 0b01, (outs GPRNoX0:$rd_wb),
++                         (ins GPRNoX0:$rd, simm6:$imm),
++                         "c.addiw", "$rd, $imm"> {
++  let Constraints = "$rd = $rd_wb";
++  let Inst{6-2} = imm{4-0};
++}
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_LI : RVInst16CI<0b010, 0b01, (outs GPRNoX0:$rd), (ins simm6:$imm),
++                      "c.li", "$rd, $imm"> {
++  let Inst{6-2} = imm{4-0};
++}
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_ADDI16SP : RVInst16CI<0b011, 0b01, (outs SP:$rd_wb),
++                            (ins SP:$rd, simm10_lsb0000nonzero:$imm),
++                            "c.addi16sp", "$rd, $imm"> {
++  let Constraints = "$rd = $rd_wb";
++  let Inst{12} = imm{9};
++  let Inst{11-7} = 2;
++  let Inst{6} = imm{4};
++  let Inst{5} = imm{6};
++  let Inst{4-3} = imm{8-7};
++  let Inst{2} = imm{5};
++}
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_LUI : RVInst16CI<0b011, 0b01, (outs GPRNoX0X2:$rd),
++                       (ins c_lui_imm:$imm),
++                       "c.lui", "$rd, $imm"> {
++  let Inst{6-2} = imm{4-0};
++}
++
++def C_SRLI : Shift_right<0b00, "c.srli", GPRC, uimmlog2xlennonzero>;
++def C_SRAI : Shift_right<0b01, "c.srai", GPRC, uimmlog2xlennonzero>;
++
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_ANDI : RVInst16CB<0b100, 0b01, (outs GPRC:$rs1_wb), (ins GPRC:$rs1, simm6:$imm),
++                        "c.andi", "$rs1, $imm"> {
++  let Constraints = "$rs1 = $rs1_wb";
++  let Inst{12} = imm{5};
++  let Inst{11-10} = 0b10;
++  let Inst{6-2} = imm{4-0};
++}
++
++def C_SUB : CS_ALU<0b00, "c.sub", GPRC, 0>;
++def C_XOR : CS_ALU<0b01, "c.xor", GPRC, 0>;
++def C_OR  : CS_ALU<0b10, "c.or" , GPRC, 0>;
++def C_AND : CS_ALU<0b11, "c.and", GPRC, 0>;
++
++let Predicates = [HasStdExtC, IsRV64] in {
++def C_SUBW : CS_ALU<0b00, "c.subw", GPRC, 1>;
++def C_ADDW : CS_ALU<0b01, "c.addw", GPRC, 1>;
++}
++
+ let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
+ def C_J : RVInst16CJ<0b101, 0b01, (outs), (ins simm12_lsb0:$offset),
+                      "c.j", "$offset"> {
+@@ -150,11 +355,32 @@ def C_J : RVInst16CJ<0b101, 0b01, (outs), (ins simm12_lsb0:$offset),
+ def C_BEQZ : Bcz<0b110, "c.beqz",  seteq, GPRC>;
+ def C_BNEZ : Bcz<0b111, "c.bnez",  setne, GPRC>;
+ 
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_SLLI : RVInst16CI<0b000, 0b10, (outs GPRNoX0:$rd_wb),
++                        (ins GPRNoX0:$rd, uimmlog2xlennonzero:$imm),
++                        "c.slli" ,"$rd, $imm"> {
++  let Constraints = "$rd = $rd_wb";
++  let Inst{6-2} = imm{4-0};
++}
++
++let Predicates = [HasStdExtC, HasStdExtD] in
++def C_FLDSP : CStackLoad<0b001, "c.fldsp", FPR64, uimm9_lsb000> {
++  let Inst{6-5} = imm{4-3};
++  let Inst{4-2} = imm{8-6};
++}
++
+ def C_LWSP : CStackLoad<0b010, "c.lwsp", GPRNoX0, uimm8_lsb00> {
+   let Inst{6-4} = imm{4-2};
+   let Inst{3-2} = imm{7-6};
+ }
+ 
++let DecoderNamespace = "RISCV32Only_",
++    Predicates = [HasStdExtC, HasStdExtF, IsRV32] in
++def C_FLWSP : CStackLoad<0b011, "c.flwsp", FPR32, uimm8_lsb00> {
++  let Inst{6-4} = imm{4-2};
++  let Inst{3-2} = imm{7-6};
++}
++
+ let Predicates = [HasStdExtC, IsRV64] in
+ def C_LDSP : CStackLoad<0b011, "c.ldsp", GPRNoX0, uimm9_lsb000> {
+   let Inst{6-5} = imm{4-3};
+@@ -171,16 +397,43 @@ def C_JR : RVInst16CR<0b1000, 0b10, (outs), (ins GPRNoX0:$rs1),
+   let rs2 = 0;
+ }
+ 
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_MV : RVInst16CR<0b1000, 0b10, (outs GPRNoX0:$rs1), (ins GPRNoX0:$rs2),
++                      "c.mv", "$rs1, $rs2">;
++
++let rs1 = 0, rs2 = 0, hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_EBREAK : RVInst16CR<0b1001, 0b10, (outs), (ins), "c.ebreak", "">;
++
+ let hasSideEffects = 0, mayLoad = 0, mayStore = 0,
+     isCall=1, Defs=[X1], rs2 = 0 in
+ def C_JALR : RVInst16CR<0b1001, 0b10, (outs), (ins GPRNoX0:$rs1),
+                         "c.jalr", "$rs1">;
+ 
++let hasSideEffects = 0, mayLoad = 0, mayStore = 0 in
++def C_ADD : RVInst16CR<0b1001, 0b10, (outs GPRNoX0:$rs1_wb),
++                       (ins GPRNoX0:$rs1, GPRNoX0:$rs2),
++                       "c.add", "$rs1, $rs2"> {
++  let Constraints = "$rs1 = $rs1_wb";
++}
++
++let Predicates = [HasStdExtC, HasStdExtD] in
++def C_FSDSP : CStackStore<0b101, "c.fsdsp", FPR64, uimm9_lsb000> {
++  let Inst{12-10} = imm{5-3};
++  let Inst{9-7}   = imm{8-6};
++}
++
+ def C_SWSP : CStackStore<0b110, "c.swsp", GPR, uimm8_lsb00> {
+   let Inst{12-9} = imm{5-2};
+   let Inst{8-7}  = imm{7-6};
+ }
+ 
++let DecoderNamespace = "RISCV32Only_",
++    Predicates = [HasStdExtC, HasStdExtF, IsRV32] in
++def C_FSWSP : CStackStore<0b111, "c.fswsp", FPR32, uimm8_lsb00> {
++  let Inst{12-9} = imm{5-2};
++  let Inst{8-7}  = imm{7-6};
++}
++
+ let Predicates = [HasStdExtC, IsRV64] in
+ def C_SDSP : CStackStore<0b111, "c.sdsp", GPR, uimm9_lsb000> {
+   let Inst{12-10} = imm{5-3};
+diff --git a/lib/Target/RISCV/RISCVRegisterInfo.td b/lib/Target/RISCV/RISCVRegisterInfo.td
+index c17a359743a..21be2e332e5 100644
+--- a/lib/Target/RISCV/RISCVRegisterInfo.td
++++ b/lib/Target/RISCV/RISCVRegisterInfo.td
+@@ -106,6 +106,19 @@ def GPRNoX0 : RegisterClass<"RISCV", [XLenVT], 32, (add
+       [RegInfo<32,32,32>, RegInfo<64,64,64>, RegInfo<32,32,32>]>;
+ }
+ 
++def GPRNoX0X2 : RegisterClass<"RISCV", [XLenVT], 32, (add
++    (sequence "X%u", 10, 17),
++    (sequence "X%u", 5, 7),
++    (sequence "X%u", 28, 31),
++    (sequence "X%u", 8, 9),
++    (sequence "X%u", 18, 27),
++    X1, X3, X4
++  )> {
++  let RegInfos = RegInfoByHwMode<
++      [RV32,              RV64,              DefaultMode],
++      [RegInfo<32,32,32>, RegInfo<64,64,64>, RegInfo<32,32,32>]>;
++}
++
+ def GPRC : RegisterClass<"RISCV", [XLenVT], 32, (add
+     (sequence "X%u", 10, 15),
+     (sequence "X%u", 8, 9)
+@@ -172,6 +185,11 @@ def FPR32 : RegisterClass<"RISCV", [f32], 32, (add
+     (sequence "F%u_32", 18, 27)
+ )>;
+ 
++def FPR32C : RegisterClass<"RISCV", [f32], 32, (add
++  (sequence "F%u_32", 10, 15),
++  (sequence "F%u_32", 8, 9)
++)>;
++
+ // The order of registers represents the preferred allocation sequence,
+ // meaning caller-save regs are listed before callee-save.
+ def FPR64 : RegisterClass<"RISCV", [f64], 64, (add
+@@ -181,3 +199,8 @@ def FPR64 : RegisterClass<"RISCV", [f64], 64, (add
+     (sequence "F%u_64", 8, 9),
+     (sequence "F%u_64", 18, 27)
+ )>;
++
++def FPR64C : RegisterClass<"RISCV", [f64], 64, (add
++  (sequence "F%u_64", 10, 15),
++  (sequence "F%u_64", 8, 9)
++)>;
+diff --git a/test/MC/RISCV/rv32c-invalid.s b/test/MC/RISCV/rv32c-invalid.s
+index 639148bb4ff..8ee7c961237 100644
+--- a/test/MC/RISCV/rv32c-invalid.s
++++ b/test/MC/RISCV/rv32c-invalid.s
+@@ -6,15 +6,58 @@ c.lw  ra, 4(sp) # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+ c.sw  sp, 4(sp) # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+ c.beqz  t0, .LBB # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+ c.bnez  s8, .LBB # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
++c.addi4spn  s4, sp, 12 # CHECK: :[[@LINE]]:13: error: invalid operand for instruction
++c.srli  s7, 12 # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
++c.srai  t0, 12 # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
++c.andi  t1, 12 # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
++c.and  t1, a0 # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
++c.or   a0, s8 # CHECK: :[[@LINE]]:12: error: invalid operand for instruction
++c.xor  t2, a0 # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
++c.sub  a0, s8 # CHECK: :[[@LINE]]:12: error: invalid operand for instruction
+ 
+ ## GPRNoX0
+ c.lwsp  x0, 4(sp) # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+ c.lwsp  zero, 4(sp) # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+ c.jr  x0 # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
+ c.jalr  zero # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
++c.addi  x0, x0, 1 # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
++c.li  zero, 2 # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
++c.slli  zero, zero, 4 # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
++c.mv  zero, s0 # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
++c.mv  ra, x0 # CHECK: :[[@LINE]]:11: error: invalid operand for instruction
++c.add  ra, ra, x0 # CHECK: :[[@LINE]]:16: error: invalid operand for instruction
++c.add  zero, zero, sp # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
++
++## GPRNoX0X2
++c.lui x0, 4 # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
++c.lui x2, 4 # CHECK: :[[@LINE]]:7: error: invalid operand for instruction
++
++## SP
++c.addi4spn  a0, a0, 12 # CHECK: :[[@LINE]]:17: error: invalid operand for instruction
++c.addi16sp  t0, 16 # CHECK: :[[@LINE]]:13: error: invalid operand for instruction
+ 
+ # Out of range immediates
+ 
++## uimmlog2xlennonzero
++c.slli t0, 64 # CHECK: :[[@LINE]]:12: error: immediate must be an integer in the range [1, 31]
++c.srli a0, 32 # CHECK: :[[@LINE]]:12: error: immediate must be an integer in the range [1, 31]
++c.srai a0, 0  # CHECK: :[[@LINE]]:12: error: immediate must be an integer in the range [1, 31]
++
++## simm6
++c.li t0, 128 # CHECK: :[[@LINE]]:10: error: immediate must be an integer in the range [-32, 31]
++c.andi a0, -33 # CHECK: :[[@LINE]]:12: error: immediate must be an integer in the range [-32, 31]
++
++## simm6nonzero
++c.addi t0, 0 # CHECK: :[[@LINE]]:12: error: immediate must be non-zero in the range [-32, 31]
++c.addi t0, -33 # CHECK: :[[@LINE]]:12: error: immediate must be non-zero in the range [-32, 31]
++c.addi t0, 32 # CHECK: :[[@LINE]]:12: error: immediate must be non-zero in the range [-32, 31]
++
++## c_lui_imm
++c.lui t0, 0 # CHECK: :[[@LINE]]:11: error: immediate must be in [0xfffe0, 0xfffff] or [1, 31]
++c.lui t0, 32 # CHECK: :[[@LINE]]:11: error: immediate must be in [0xfffe0, 0xfffff] or [1, 31]
++c.lui t0, 0xffffdf # CHECK: :[[@LINE]]:11: error: immediate must be in [0xfffe0, 0xfffff] or [1, 31]
++c.lui t0, 0x1000000 # CHECK: :[[@LINE]]:11: error: immediate must be in [0xfffe0, 0xfffff] or [1, 31]
++
+ ## uimm8_lsb00
+ c.lwsp  ra, 256(sp) # CHECK: :[[@LINE]]:13: error: immediate must be a multiple of 4 bytes in the range [0, 252]
+ c.swsp  ra, -4(sp) # CHECK: :[[@LINE]]:13: error: immediate must be a multiple of 4 bytes in the range [0, 252]
+@@ -29,3 +72,12 @@ c.beqz  a0, 256 # CHECK: :[[@LINE]]:13: error: immediate must be a multiple of 2
+ ## simm12_lsb0
+ c.j 2048 # CHECK: :[[@LINE]]:5: error: immediate must be a multiple of 2 bytes in the range [-2048, 2046]
+ c.jal -2050 # CHECK: :[[@LINE]]:7: error: immediate must be a multiple of 2 bytes in the range [-2048, 2046]
++
++## uimm10_lsb00nonzero
++c.addi4spn  a0, sp, 0 # CHECK: :[[@LINE]]:21: error: immediate must be a multiple of 4 bytes in the range [4, 1020]
++c.addi4spn  a0, sp, 1024 # CHECK: :[[@LINE]]:21: error: immediate must be a multiple of 4 bytes in the range [4, 1020]
++
++## simm10_lsb0000nonzero
++c.addi16sp  sp, -528 # CHECK: :[[@LINE]]:17: error: immediate must be a multiple of 16 bytes and non-zero in the range [-512, 496]
++c.addi16sp  sp, 512 # CHECK: :[[@LINE]]:17: error: immediate must be a multiple of 16 bytes and non-zero in the range [-512, 496]
++c.addi16sp  sp, 0 # CHECK: :[[@LINE]]:17: error: immediate must be a multiple of 16 bytes and non-zero in the range [-512, 496]
+diff --git a/test/MC/RISCV/rv32c-only-valid.s b/test/MC/RISCV/rv32c-only-valid.s
+new file mode 100644
+index 00000000000..45127f59591
+--- /dev/null
++++ b/test/MC/RISCV/rv32c-only-valid.s
+@@ -0,0 +1,15 @@
++# RUN: llvm-mc -triple=riscv32 -mattr=+c -show-encoding < %s \
++# RUN:     | FileCheck -check-prefixes=CHECK,CHECK-INST %s
++# RUN: llvm-mc -filetype=obj -triple riscv32 -mattr=+c < %s \
++# RUN:     | llvm-objdump -mattr=+c -d - | FileCheck -check-prefix=CHECK-INST %s
++# RUN: not llvm-mc -triple riscv32 \
++# RUN:     -show-encoding < %s 2>&1 \
++# RUN:     | FileCheck -check-prefixes=CHECK-NO-EXT %s
++# RUN: not llvm-mc -triple riscv64 -mattr=+c \
++# RUN:     -show-encoding < %s 2>&1 \
++# RUN:     | FileCheck -check-prefixes=CHECK-NO-EXT %s
++
++# CHECK-INST: c.jal    2046
++# CHECK: encoding: [0xfd,0x2f]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.jal    2046
+diff --git a/test/MC/RISCV/rv32c-valid.s b/test/MC/RISCV/rv32c-valid.s
+index ce4273d3802..d3ed7211e83 100644
+--- a/test/MC/RISCV/rv32c-valid.s
++++ b/test/MC/RISCV/rv32c-valid.s
+@@ -25,9 +25,6 @@ c.sw    a5, 124(a3)
+ # CHECK-INST: c.j     -2048
+ # CHECK: encoding: [0x01,0xb0]
+ c.j     -2048
+-# CHECK-INST: c.jal    2046
+-# CHECK: encoding: [0xfd,0x2f]
+-c.jal    2046
+ # CHECK-INST: c.jr    a7
+ # CHECK: encoding: [0x82,0x88]
+ c.jr    a7
+@@ -40,3 +37,67 @@ c.beqz  a3, -256
+ # CHECK-INST: c.bnez  a5,  254
+ # CHECK: encoding: [0xfd,0xef]
+ c.bnez  a5,  254
++
++# CHECK-INST: c.li  a7, 31
++# CHECK: encoding: [0xfd,0x48]
++c.li    a7, 31
++# CHECK-INST: c.addi  a3, -32
++# CHECK: encoding: [0x81,0x16]
++c.addi  a3, -32
++# CHECK-INST: c.addi16sp  sp, -512
++# CHECK: encoding: [0x01,0x71]
++c.addi16sp  sp, -512
++# CHECK-INST: c.addi16sp  sp, 496
++# CHECK: encoding: [0x7d,0x61]
++c.addi16sp  sp, 496
++# CHECK-INST: c.addi4spn  a3, sp, 1020
++# CHECK: encoding: [0xf4,0x1f]
++c.addi4spn      a3, sp, 1020
++# CHECK-INST: c.addi4spn  a3, sp, 4
++# CHECK: encoding: [0x54,0x00]
++c.addi4spn      a3, sp, 4
++# CHECK-INST: c.slli  a1, 1
++# CHECK: encoding: [0x86,0x05]
++c.slli  a1, 1
++# CHECK-INST: c.srli  a3, 31
++# CHECK: encoding: [0xfd,0x82]
++c.srli  a3, 31
++# CHECK-INST: c.srai  a4, 2
++# CHECK: encoding: [0x09,0x87]
++c.srai  a4, 2
++# CHECK-INST: c.andi  a5, 15
++# CHECK: encoding: [0xbd,0x8b]
++c.andi  a5, 15
++# CHECK-INST: c.mv    a7, s0
++# CHECK: encoding: [0xa2,0x88]
++c.mv    a7, s0
++# CHECK-INST: c.and   a1, a2
++# CHECK: encoding: [0xf1,0x8d]
++c.and   a1, a2
++# CHECK-INST: c.or    a2, a3
++# CHECK: encoding: [0x55,0x8e]
++c.or    a2, a3
++# CHECK-INST: c.xor   a3, a4
++# CHECK: encoding: [0xb9,0x8e]
++c.xor   a3, a4
++# CHECK-INST: c.sub   a4, a5
++# CHECK: encoding: [0x1d,0x8f]
++c.sub   a4, a5
++# CHECK-INST: c.nop
++# CHECK: encoding: [0x01,0x00]
++c.nop
++# CHECK-INST: c.ebreak
++# CHECK: encoding: [0x02,0x90]
++c.ebreak
++# CHECK-INST: c.lui   s0, 1
++# CHECK: encoding: [0x05,0x64]
++c.lui   s0, 1
++# CHECK-INST: c.lui   s0, 31
++# CHECK: encoding: [0x7d,0x64]
++c.lui   s0, 31
++# CHECK-INST: c.lui   s0, 1048544
++# CHECK: encoding: [0x01,0x74]
++c.lui   s0, 0xfffe0
++# CHECK-INST: c.lui   s0, 1048575
++# CHECK: encoding: [0x7d,0x74]
++c.lui   s0, 0xfffff
+diff --git a/test/MC/RISCV/rv32dc-invalid.s b/test/MC/RISCV/rv32dc-invalid.s
+new file mode 100644
+index 00000000000..70fb504b1bb
+--- /dev/null
++++ b/test/MC/RISCV/rv32dc-invalid.s
+@@ -0,0 +1,12 @@
++# RUN: not llvm-mc -triple=riscv32 -mattr=+c,+d < %s 2>&1 | FileCheck %s
++
++## FPRC
++c.fld  ft3, 8(a5) # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
++
++## uimm9_lsb000
++c.fldsp  fs1, 512(sp) # CHECK: :[[@LINE]]:15: error: immediate must be a multiple of 8 bytes in the range [0, 504]
++c.fsdsp  fs2, -8(sp) # CHECK: :[[@LINE]]:15: error: immediate must be a multiple of 8 bytes in the range [0, 504]
++
++## uimm8_lsb000
++c.fld  fs0, -8(sp) # CHECK: :[[@LINE]]:13: error: immediate must be a multiple of 8 bytes in the range [0, 248]
++c.fsd  fs1, 256(sp) # CHECK: :[[@LINE]]:13: error: immediate must be a multiple of 8 bytes in the range [0, 248]
+diff --git a/test/MC/RISCV/rv32dc-valid.s b/test/MC/RISCV/rv32dc-valid.s
+new file mode 100644
+index 00000000000..88bd86f29ec
+--- /dev/null
++++ b/test/MC/RISCV/rv32dc-valid.s
+@@ -0,0 +1,29 @@
++# RUN: llvm-mc %s -triple=riscv32 -mattr=+c,+d -show-encoding \
++# RUN:     | FileCheck -check-prefixes=CHECK,CHECK-INST %s
++# RUN: llvm-mc -filetype=obj -triple=riscv32 -mattr=+c,+d < %s \
++# RUN:     | llvm-objdump -mattr=+c,+d -d - \
++# RUN:     | FileCheck -check-prefix=CHECK-INST %s
++# RUN: not llvm-mc -triple riscv32 -mattr=+c\
++# RUN:     -show-encoding < %s 2>&1 \
++# RUN:     | FileCheck -check-prefixes=CHECK-NO-EXT %s
++# RUN: not llvm-mc -triple riscv32 \
++# RUN:     -show-encoding < %s 2>&1 \
++# RUN:     | FileCheck -check-prefixes=CHECK-NO-EXT %s
++
++# CHECK-INST: c.fldsp  fs0, 504(sp)
++# CHECK: encoding: [0x7e,0x34]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fldsp  fs0, 504(sp)
++# CHECK-INST: c.fsdsp  fa7, 504(sp)
++# CHECK: encoding: [0xc6,0xbf]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fsdsp  fa7, 504(sp)
++
++# CHECK-INST: c.fld  fa3, 248(a5)
++# CHECK: encoding: [0xf4,0x3f]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fld  fa3, 248(a5)
++# CHECK-INST: c.fsd  fa2, 248(a1)
++# CHECK: encoding: [0xf0,0xbd]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fsd  fa2, 248(a1)
+diff --git a/test/MC/RISCV/rv32fc-invalid.s b/test/MC/RISCV/rv32fc-invalid.s
+new file mode 100644
+index 00000000000..5af3df17671
+--- /dev/null
++++ b/test/MC/RISCV/rv32fc-invalid.s
+@@ -0,0 +1,12 @@
++# RUN: not llvm-mc -triple=riscv32 -mattr=+c,+f < %s 2>&1 | FileCheck %s
++
++## FPRC
++c.flw  ft3, 8(a5) # CHECK: :[[@LINE]]:8: error: invalid operand for instruction
++
++## uimm8_lsb00
++c.flwsp  fs1, 256(sp) # CHECK: :[[@LINE]]:15: error: immediate must be a multiple of 4 bytes in the range [0, 252]
++c.fswsp  fs2, -4(sp) # CHECK: :[[@LINE]]:15: error: immediate must be a multiple of 4 bytes in the range [0, 252]
++
++## uimm7_lsb00
++c.flw  fs0, -4(sp) # CHECK: :[[@LINE]]:13: error: immediate must be a multiple of 4 bytes in the range [0, 124]
++c.fsw  fs1, 128(sp) # CHECK: :[[@LINE]]:13: error: immediate must be a multiple of 4 bytes in the range [0, 124]
+diff --git a/test/MC/RISCV/rv32fc-valid.s b/test/MC/RISCV/rv32fc-valid.s
+new file mode 100644
+index 00000000000..e5b629f34cc
+--- /dev/null
++++ b/test/MC/RISCV/rv32fc-valid.s
+@@ -0,0 +1,32 @@
++# RUN: llvm-mc %s -triple=riscv32 -mattr=+c,+f -show-encoding \
++# RUN:     | FileCheck -check-prefixes=CHECK,CHECK-INST %s
++# RUN: llvm-mc -filetype=obj -triple=riscv32 -mattr=+c,+f < %s \
++# RUN:     | llvm-objdump -mattr=+c,+f -d - \
++# RUN:     | FileCheck -check-prefix=CHECK-INST %s
++# RUN: not llvm-mc -triple riscv32 -mattr=+c \
++# RUN:     -show-encoding < %s 2>&1 \
++# RUN:     | FileCheck -check-prefixes=CHECK-NO-EXT %s
++# RUN: not llvm-mc -triple riscv32 \
++# RUN:     -show-encoding < %s 2>&1 \
++# RUN:     | FileCheck -check-prefixes=CHECK-NO-EXT %s
++# RUN: not llvm-mc -triple riscv64 -mattr=+c,+f \
++# RUN:     -show-encoding < %s 2>&1 \
++# RUN:     | FileCheck -check-prefixes=CHECK-NO-EXT %s
++
++# CHECK-INST: c.flwsp  fs0, 252(sp)
++# CHECK: encoding: [0x7e,0x74]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.flwsp  fs0, 252(sp)
++# CHECK-INST: c.fswsp  fa7, 252(sp)
++# CHECK: encoding: [0xc6,0xff]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fswsp  fa7, 252(sp)
++
++# CHECK-INST: c.flw  fa3, 124(a5)
++# CHECK: encoding: [0xf4,0x7f]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.flw  fa3, 124(a5)
++# CHECK-INST: c.fsw  fa2, 124(a1)
++# CHECK: encoding: [0xf0,0xfd]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fsw  fa2, 124(a1)
+diff --git a/test/MC/RISCV/rv64c-invalid.s b/test/MC/RISCV/rv64c-invalid.s
+index 1dcf5e40a8a..fdbcaba244f 100644
+--- a/test/MC/RISCV/rv64c-invalid.s
++++ b/test/MC/RISCV/rv64c-invalid.s
+@@ -3,6 +3,8 @@
+ ## GPRC
+ c.ld ra, 4(sp) # CHECK: :[[@LINE]]:6: error: invalid operand for instruction
+ c.sd sp, 4(sp) # CHECK: :[[@LINE]]:6: error: invalid operand for instruction
++c.addw   a0, a7 # CHECK: :[[@LINE]]:14: error: invalid operand for instruction
++c.subw   a0, a6 # CHECK: :[[@LINE]]:14: error: invalid operand for instruction
+ 
+ ## GPRNoX0
+ c.ldsp  x0, 4(sp) # CHECK: :[[@LINE]]:9: error: invalid operand for instruction
+@@ -10,6 +12,15 @@ c.ldsp  zero, 4(sp) # CHECK: :[[@LINE]]:9: error: invalid operand for instructio
+ 
+ # Out of range immediates
+ 
++## uimmlog2xlennonzero
++c.slli t0, 64 # CHECK: :[[@LINE]]:12: error: immediate must be an integer in the range [1, 63]
++c.srli a0, -1 # CHECK: :[[@LINE]]:12: error: immediate must be an integer in the range [1, 63]
++c.srai a0, 0  # CHECK: :[[@LINE]]:12: error: immediate must be an integer in the range [1, 63]
++
++## simm6
++c.addiw t0, -33 # CHECK: :[[@LINE]]:13: error: immediate must be an integer in the range [-32, 31]
++c.addiw t0, 32 # CHECK: :[[@LINE]]:13: error: immediate must be an integer in the range [-32, 31]
++
+ ## uimm9_lsb000
+ c.ldsp  ra, 512(sp) # CHECK: :[[@LINE]]:13: error: immediate must be a multiple of 8 bytes in the range [0, 504]
+ c.sdsp  ra, -8(sp) # CHECK: :[[@LINE]]:13: error: immediate must be a multiple of 8 bytes in the range [0, 504]
+diff --git a/test/MC/RISCV/rv64c-valid.s b/test/MC/RISCV/rv64c-valid.s
+index 5efc7a9036a..e71cf9d3fb5 100644
+--- a/test/MC/RISCV/rv64c-valid.s
++++ b/test/MC/RISCV/rv64c-valid.s
+@@ -28,3 +28,31 @@ c.ld    a4, 0(a3)
+ # CHECK: encoding: [0xfc,0xfe]
+ # CHECK-NO-EXT:  error: instruction use requires an option to be enabled
+ c.sd    a5, 248(a3)
++
++# CHECK-INST: c.subw   a3, a4
++# CHECK: encoding: [0x99,0x9e]
++c.subw   a3, a4
++# CHECK-INST: c.addw   a0, a2
++# CHECK: encoding: [0x31,0x9d]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.addw   a0, a2
++
++# CHECK-INST: c.addiw  a3, -32
++# CHECK: encoding: [0x81,0x36]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.addiw  a3, -32
++# CHECK-INST: c.addiw  a3, 31
++# CHECK: encoding: [0xfd,0x26]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.addiw  a3, 31
++
++# CHECK-INST: c.slli  s0, 1
++# CHECK: encoding: [0x06,0x04]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.slli  s0, 1
++# CHECK-INST: c.srli  a3, 63
++# CHECK: encoding: [0xfd,0x92]
++c.srli  a3, 63
++# CHECK-INST: c.srai  a2, 63
++# CHECK: encoding: [0x7d,0x96]
++c.srai  a2, 63
+diff --git a/test/MC/RISCV/rv64dc-valid.s b/test/MC/RISCV/rv64dc-valid.s
+new file mode 100644
+index 00000000000..0d7ea62e9b0
+--- /dev/null
++++ b/test/MC/RISCV/rv64dc-valid.s
+@@ -0,0 +1,29 @@
++# RUN: llvm-mc %s -triple=riscv64 -mattr=+c,+d -show-encoding \
++# RUN:     | FileCheck -check-prefixes=CHECK,CHECK-INST %s
++# RUN: llvm-mc -filetype=obj -triple=riscv64 -mattr=+c,+d < %s \
++# RUN:     | llvm-objdump -mattr=+c,+d -d - \
++# RUN:     | FileCheck -check-prefix=CHECK-INST %s
++# RUN: not llvm-mc -triple riscv64 -mattr=+c\
++# RUN:     -show-encoding < %s 2>&1 \
++# RUN:     | FileCheck -check-prefixes=CHECK-NO-EXT %s
++# RUN: not llvm-mc -triple riscv64 \
++# RUN:     -show-encoding < %s 2>&1 \
++# RUN:     | FileCheck -check-prefixes=CHECK-NO-EXT %s
++
++# CHECK-INST: c.fldsp  fs0, 504(sp)
++# CHECK: encoding: [0x7e,0x34]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fldsp  fs0, 504(sp)
++# CHECK-INST: c.fsdsp  fa7, 504(sp)
++# CHECK: encoding: [0xc6,0xbf]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fsdsp  fa7, 504(sp)
++
++# CHECK-INST: c.fld  fa3, 248(a5)
++# CHECK: encoding: [0xf4,0x3f]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fld  fa3, 248(a5)
++# CHECK-INST: c.fsd  fa2, 248(a1)
++# CHECK: encoding: [0xf0,0xbd]
++# CHECK-NO-EXT:  error: instruction use requires an option to be enabled
++c.fsd  fa2, 248(a1)
+-- 
+2.16.2
+
